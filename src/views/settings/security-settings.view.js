@@ -3,6 +3,7 @@
 // Password management, Session termination, and Synthetic Alias verification
 // ==============================================================================
 import { authService } from '../../services/auth.service.js';
+import { notificationService } from '../../services/notification.service.js';
 import { router } from '../../core/router.js';
 import { createSettingsShell } from './settings-shell.js';
 
@@ -101,6 +102,11 @@ export const SecuritySettingsView = {
             if (res.success) {
                 alertArea.innerHTML = `<div class="alert-box alert-success">Password updated successfully!</div>`;
                 form.reset();
+                notificationService.sendSecurityAlert({
+                    title: 'Password Updated',
+                    body: 'Your account password was successfully updated.',
+                    data: { event: 'password_updated' }
+                });
             } else {
                 alertArea.innerHTML = `<div class="alert-box alert-error">${res.error}</div>`;
             }
@@ -113,6 +119,11 @@ export const SecuritySettingsView = {
 
         root.querySelector('#btn-sec-logout-all').addEventListener('click', async () => {
             if (confirm('Log out of all active devices and sessions?')) {
+                await notificationService.sendSecurityAlert({
+                    title: 'Active Sessions Terminated',
+                    body: 'All active sessions across other devices were terminated.',
+                    data: { event: 'sessions_terminated' }
+                });
                 await authService.logoutAllSessions();
                 router.navigate('#/auth/login');
             }

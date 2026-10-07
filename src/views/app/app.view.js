@@ -9,6 +9,7 @@ import { friendService } from '../../services/friend.service.js';
 import { realtimeService } from '../../services/realtime.service.js';
 import { storageService } from '../../services/storage.service.js';
 import { profileService } from '../../services/profile.service.js';
+import { notificationService, NOTIFICATION_TYPES } from '../../services/notification.service.js';
 import { CONFIG } from '../../config.js';
 import { supabase } from '../../core/supabase.js';
 import { router } from '../../core/router.js';
@@ -17,6 +18,7 @@ export const AppView = {
     state: {
         activeTab: 'chats', // 'chats' | 'friends' | 'groups' | 'notifications' | 'profile' | 'settings'
         activeFriendsSubTab: 'all', // 'all' | 'incoming' | 'outgoing' | 'search' | 'blocked'
+        activeNotificationsFilter: 'all', // 'all' | 'unread'
         activeConversation: null,
         conversations: [],
         messages: [],
@@ -27,15 +29,19 @@ export const AppView = {
         friendsSearchQuery: '',
         friendsSearchResults: [],
         groups: [],
+        notifications: [],
+        unreadNotificationsCount: 0,
         currentUser: null,
         currentProfile: null,
         stats: { friendsCount: 0, groupsCount: 0, joinedDate: '2026' },
         typingMap: new Map(),
         isLoadingConversations: true,
-        isLoadingMessages: false
+        isLoadingMessages: false,
+        isLoadingNotifications: false
     },
 
     unsubscribeRealtime: null,
+    unsubscribeNotifications: null,
 
     async render() {
         const container = document.createElement('div');
@@ -359,6 +365,7 @@ export const AppView = {
         this.bindEvents(container);
         this.loadConversations(container);
         this.refreshSocialState(container);
+        this.refreshNotifications(container);
         this.setupRealtimeListeners(container);
 
         return container;
@@ -610,12 +617,17 @@ export const AppView = {
                     this.showPrivacyToast(alertMsg);
                     this.appendSystemNotice(root, alertMsg, 'notice-alert');
 
-                    // Broadcast alert to peer in active conversation
-                    realtimeService.broadcastPrivacyAlert(this.state.activeConversation.id, {
-                        conversationId: this.state.activeConversation.id,
-                        actorUsername: this.state.currentProfile?.username || 'User',
-                        type: 'screenshot_shortcut'
-                    });
+                    if (this.state.activeConversation) {
+                        // Broadcast alert to peer in active conversation
+                        realtimeService.broadcastPrivacyAlert(this.state.activeConversation.id, {
+                            conversationId: this.state.activeConversation.id,
+                            actorUsername: this.state.currentProfile?.username || 'User',
+                            type: 'screenshot_shortcut'
+                        });
+
+                        // Persist SCREENSHOT_ATTEMPT notification to peers and self
+                        notificationService.recordScreenshotAttempt(this.state.activeConversation.id);
+                    }
                 }
             }
         };
@@ -840,6 +852,16 @@ export const AppView = {
         chatService.markMessagesDelivered(conv.id);
         chatService.markMessagesAsRead(conv.id);
         conv.hasUnread = false;
+
+        // Clear unread notifications associated with this conversation
+        if (Array.isArray(this.state.notifications)) {
+            const matchingNotifs = this.state.notifications.filter(
+                n => !n.isRead && (n.data?.conversation_id === conv.id || n.data?.group_id === conv.id)
+            );
+            matchingNotifs.forEach(n => {
+                this.markNotificationAsRead(root, n.id);
+            });
+        }
 
         // Load Messages
         await this.loadMessages(root, conv.id);
@@ -1775,14 +1797,7 @@ export const AppView = {
             });
 
         } else if (this.state.activeTab === 'notifications') {
-            title.textContent = 'Notifications';
-            list.innerHTML = `
-                <div class="empty-state-box">
-                    <div class="empty-state-icon">🔔</div>
-                    <h3 class="empty-state-title">All caught up!</h3>
-                    <p class="empty-state-desc">No new friend requests or unread system notifications.</p>
-                </div>
-            `;
+            await this.renderNotificationsTab(root);
         }
     },
 
@@ -2541,6 +2556,434 @@ export const AppView = {
         const days = Math.floor(hours / 24);
         if (days < 30) return `${days}d ago`;
         return new Date(isoString).toLocaleDateString();
+    },
+
+    /**
+     * Update navigation badges for notifications
+     */
+    updateNotificationsBadges(root) {
+        const count = this.state.unreadNotificationsCount || 0;
+
+        const badgeEl = root.querySelector('#badge-notifications');
+        if (badgeEl) {
+            badgeEl.textContent = String(count);
+            badgeEl.style.display = count > 0 ? 'inline-block' : 'none';
+        }
+
+        const bottomBadgeEl = root.querySelector('#bottom-badge-notif');
+        if (bottomBadgeEl) {
+            bottomBadgeEl.textContent = count > 0 ? String(count) : '';
+            bottomBadgeEl.style.display = count > 0 ? 'inline-block' : 'none';
+        }
+
+        const pillBadge = root.querySelector('#notif-pill-unread-count');
+        if (pillBadge) {
+            pillBadge.textContent = String(count);
+            pillBadge.style.display = count > 0 ? 'inline-block' : 'none';
+        }
+
+        const markAllBtn = root.querySelector('#btn-mark-all-read');
+        if (markAllBtn) {
+            markAllBtn.disabled = count === 0;
+            markAllBtn.style.opacity = count === 0 ? '0.5' : '1';
+        }
+    },
+
+    /**
+     * Refresh notifications overview and badges from database
+     */
+    async refreshNotifications(root) {
+        const count = await notificationService.getUnreadCount();
+        this.state.unreadNotificationsCount = count;
+        this.updateNotificationsBadges(root);
+
+        if (this.state.activeTab === 'notifications') {
+            await this.renderNotificationsTab(root);
+        }
+    },
+
+    /**
+     * Handle incoming real-time notifications
+     */
+    handleRealtimeNotification(root, eventType, record) {
+        if (!record) return;
+
+        if (eventType === 'INSERT') {
+            if (!record.isRead) {
+                this.state.unreadNotificationsCount = (this.state.unreadNotificationsCount || 0) + 1;
+            }
+            this.state.notifications.unshift(record);
+            this.updateNotificationsBadges(root);
+
+            if (this.state.activeTab === 'notifications') {
+                this.renderNotificationsTab(root);
+            } else {
+                this.showPrivacyToast(`🔔 ${record.title}: ${record.body}`);
+            }
+        } else if (eventType === 'UPDATE') {
+            const idx = this.state.notifications.findIndex(n => n.id === record.id);
+            if (idx !== -1) {
+                this.state.notifications[idx] = record;
+            }
+            this.state.unreadNotificationsCount = this.state.notifications.filter(n => !n.isRead).length;
+            this.updateNotificationsBadges(root);
+
+            if (this.state.activeTab === 'notifications') {
+                const card = root.querySelector(`.notif-card[data-id="${record.id}"]`);
+                if (card && record.isRead) {
+                    card.classList.remove('unread');
+                    card.classList.add('read');
+                    card.querySelector('.notif-unread-dot')?.remove();
+                    card.querySelector('.notif-btn-read')?.remove();
+                }
+            }
+        } else if (eventType === 'DELETE') {
+            this.state.notifications = this.state.notifications.filter(n => n.id !== record.id);
+            this.state.unreadNotificationsCount = this.state.notifications.filter(n => !n.isRead).length;
+            this.updateNotificationsBadges(root);
+
+            if (this.state.activeTab === 'notifications') {
+                const card = root.querySelector(`.notif-card[data-id="${record.id}"]`);
+                if (card) {
+                    card.remove();
+                    const body = root.querySelector('#notif-list-body');
+                    if (body && body.children.length === 0) {
+                        this.renderNotificationsTab(root);
+                    }
+                }
+            }
+        }
+    },
+
+    /**
+     * Render Notification Center (Rule 14, 15, 16, 19: Loading, Empty, Error, Content)
+     */
+    async renderNotificationsTab(root) {
+        const list = root.querySelector('#sidebar-list-content');
+        const title = root.querySelector('#sidebar-section-title');
+        if (title) title.textContent = 'Notifications';
+
+        const filter = this.state.activeNotificationsFilter || 'all';
+        const unreadCount = this.state.unreadNotificationsCount || 0;
+
+        list.innerHTML = `
+            <div class="notifications-container">
+                <div class="notif-action-bar">
+                    <div class="notif-filter-pills" role="tablist" aria-label="Notification Filters">
+                        <button type="button" class="notif-filter-pill ${filter === 'all' ? 'active' : ''}" data-filter="all" role="tab" aria-selected="${filter === 'all'}">
+                            <span>All</span>
+                        </button>
+                        <button type="button" class="notif-filter-pill ${filter === 'unread' ? 'active' : ''}" data-filter="unread" role="tab" aria-selected="${filter === 'unread'}">
+                            <span>Unread</span>
+                            <span class="notif-pill-badge" id="notif-pill-unread-count" style="${unreadCount > 0 ? '' : 'display: none;'}">${unreadCount}</span>
+                        </button>
+                    </div>
+                    <div class="notif-top-actions">
+                        <button type="button" id="btn-mark-all-read" class="btn-notif-action" title="Mark all as read" ${unreadCount === 0 ? 'disabled style="opacity: 0.5;"' : ''}>
+                            <span>✓</span>
+                            <span>Mark all read</span>
+                        </button>
+                        <button type="button" id="btn-clear-read-notifs" class="btn-notif-action btn-notif-action-subtle" title="Clear read notifications">
+                            <span>🗑️</span>
+                        </button>
+                    </div>
+                </div>
+                <div id="notif-list-body" class="notif-list" role="region" aria-label="Notification List">
+                    <div class="empty-state-box">
+                        <span class="spinner" style="border-top-color: var(--accent);"></span>
+                        <span style="font-size: 0.85rem; color: var(--text-muted); margin-top: 0.5rem;">Loading notifications...</span>
+                    </div>
+                </div>
+            </div>
+        `;
+
+        // Bind filter pills
+        list.querySelectorAll('.notif-filter-pill').forEach(btn => {
+            btn.addEventListener('click', () => {
+                this.state.activeNotificationsFilter = btn.dataset.filter;
+                this.renderNotificationsTab(root);
+            });
+        });
+
+        // Bind Mark all read
+        list.querySelector('#btn-mark-all-read')?.addEventListener('click', async (e) => {
+            e.target.disabled = true;
+            const res = await notificationService.markAllAsRead();
+            if (res.success) {
+                this.state.unreadNotificationsCount = 0;
+                this.state.notifications.forEach(n => { n.isRead = true; });
+                this.updateNotificationsBadges(root);
+                await this.renderNotificationsTab(root);
+            } else {
+                e.target.disabled = false;
+                alert(res.error || 'Failed to mark notifications as read.');
+            }
+        });
+
+        // Bind Clear read
+        list.querySelector('#btn-clear-read-notifs')?.addEventListener('click', async () => {
+            if (confirm('Clear all read notifications from your history?')) {
+                const res = await notificationService.clearReadNotifications();
+                if (res.success) {
+                    this.state.notifications = this.state.notifications.filter(n => !n.isRead);
+                    await this.renderNotificationsTab(root);
+                }
+            }
+        });
+
+        // Fetch notifications from service
+        const notifRes = await notificationService.getNotifications({
+            unreadOnly: filter === 'unread'
+        });
+
+        const body = list.querySelector('#notif-list-body');
+        if (!body) return;
+
+        if (!notifRes.success) {
+            body.innerHTML = `
+                <div class="empty-state-box">
+                    <div class="empty-state-icon">⚠️</div>
+                    <h3 class="empty-state-title">Unable to load notifications</h3>
+                    <p class="empty-state-desc">${this.escapeHtml(notifRes.error || 'Check connection')}</p>
+                    <button type="button" id="btn-retry-notifications" class="btn-primary" style="font-size: 0.85rem; max-width: 140px; margin-top: 0.75rem;">Retry</button>
+                </div>
+            `;
+            body.querySelector('#btn-retry-notifications')?.addEventListener('click', () => {
+                this.renderNotificationsTab(root);
+            });
+            return;
+        }
+
+        const items = notifRes.notifications || [];
+        this.state.notifications = items;
+
+        if (items.length === 0) {
+            body.innerHTML = `
+                <div class="empty-state-box">
+                    <div class="empty-state-icon">🔔</div>
+                    <h3 class="empty-state-title">${filter === 'unread' ? 'No unread notifications' : 'All caught up!'}</h3>
+                    <p class="empty-state-desc">${filter === 'unread' ? 'You have read all your alerts.' : 'No new friend requests, messages, or security alerts.'}</p>
+                </div>
+            `;
+            return;
+        }
+
+        body.innerHTML = '';
+        items.forEach(item => {
+            const card = document.createElement('article');
+            card.className = `notif-card ${item.isRead ? 'read' : 'unread'}`;
+            card.dataset.id = item.id;
+            card.tabIndex = 0;
+            card.setAttribute('role', 'button');
+            card.setAttribute('aria-label', `${item.title}: ${item.body}`);
+
+            card.innerHTML = `
+                <div class="notif-card-icon ${item.iconClass || 'notif-icon-default'}" aria-hidden="true">
+                    ${item.icon || '🔔'}
+                </div>
+                <div class="notif-card-content">
+                    <div class="notif-card-header">
+                        <h4 class="notif-card-title">${this.escapeHtml(item.title)}</h4>
+                        <time class="notif-card-time" datetime="${item.createdAt}" title="${new Date(item.createdAt).toLocaleString()}">
+                            ${this.escapeHtml(item.timeAgo)}
+                        </time>
+                    </div>
+                    <p class="notif-card-body">${this.escapeHtml(item.body)}</p>
+                    <div class="notif-card-actions">
+                        ${item.actionType && item.actionType !== 'none' && item.actionType !== 'dismiss' ? `
+                            <button type="button" class="btn-notif-btn notif-btn-action" data-action="${item.actionType}">
+                                ${this.escapeHtml(item.actionLabel)}
+                            </button>
+                        ` : ''}
+                        ${!item.isRead ? `
+                            <button type="button" class="btn-notif-btn notif-btn-read" title="Mark as read">
+                                Mark Read
+                            </button>
+                        ` : ''}
+                        <button type="button" class="btn-notif-btn notif-btn-delete" title="Dismiss notification" aria-label="Dismiss">
+                            ✕
+                        </button>
+                    </div>
+                </div>
+                ${!item.isRead ? `<span class="notif-unread-dot" title="Unread notification" aria-label="Unread"></span>` : ''}
+            `;
+
+            // Action button click
+            const actionBtn = card.querySelector('.notif-btn-action');
+            if (actionBtn) {
+                actionBtn.addEventListener('click', async (e) => {
+                    e.stopPropagation();
+                    await this.handleNotificationAction(root, item);
+                });
+            }
+
+            // Mark read button click
+            const readBtn = card.querySelector('.notif-btn-read');
+            if (readBtn) {
+                readBtn.addEventListener('click', async (e) => {
+                    e.stopPropagation();
+                    readBtn.disabled = true;
+                    await this.markNotificationAsRead(root, item.id, card);
+                });
+            }
+
+            // Delete button click
+            const delBtn = card.querySelector('.notif-btn-delete');
+            if (delBtn) {
+                delBtn.addEventListener('click', async (e) => {
+                    e.stopPropagation();
+                    delBtn.disabled = true;
+                    await this.deleteNotification(root, item.id, card);
+                });
+            }
+
+            // Card background click executes contextual action
+            card.addEventListener('click', async (e) => {
+                if (e.target.closest('button')) return;
+                await this.handleNotificationAction(root, item);
+            });
+
+            // Keyboard accessibility (Enter/Space)
+            card.addEventListener('keydown', async (e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                    if (e.target === card) {
+                        e.preventDefault();
+                        await this.handleNotificationAction(root, item);
+                    }
+                }
+            });
+
+            body.appendChild(card);
+        });
+    },
+
+    /**
+     * Mark single notification as read
+     */
+    async markNotificationAsRead(root, notificationId, cardElement = null) {
+        const res = await notificationService.markAsRead(notificationId);
+        if (res.success) {
+            const item = this.state.notifications.find(n => n.id === notificationId);
+            if (item) {
+                item.isRead = true;
+            }
+            if (this.state.unreadNotificationsCount > 0) {
+                this.state.unreadNotificationsCount -= 1;
+            }
+            this.updateNotificationsBadges(root);
+
+            if (cardElement) {
+                cardElement.classList.remove('unread');
+                cardElement.classList.add('read');
+                cardElement.querySelector('.notif-unread-dot')?.remove();
+                cardElement.querySelector('.notif-btn-read')?.remove();
+            }
+        }
+    },
+
+    /**
+     * Delete notification
+     */
+    async deleteNotification(root, notificationId, cardElement) {
+        const item = this.state.notifications.find(n => n.id === notificationId);
+        const wasUnread = item && !item.isRead;
+
+        const res = await notificationService.deleteNotification(notificationId);
+        if (res.success) {
+            this.state.notifications = this.state.notifications.filter(n => n.id !== notificationId);
+            if (wasUnread && this.state.unreadNotificationsCount > 0) {
+                this.state.unreadNotificationsCount -= 1;
+            }
+            this.updateNotificationsBadges(root);
+
+            if (cardElement) {
+                cardElement.style.transition = 'opacity 0.2s ease, transform 0.2s ease';
+                cardElement.style.opacity = '0';
+                cardElement.style.transform = 'translateY(-6px)';
+                setTimeout(() => {
+                    cardElement.remove();
+                    const body = root.querySelector('#notif-list-body');
+                    if (body && body.children.length === 0) {
+                        this.renderNotificationsTab(root);
+                    }
+                }, 200);
+            }
+        }
+    },
+
+    /**
+     * Contextual action handler when notification or its action button is clicked
+     */
+    async handleNotificationAction(root, item) {
+        if (!item.isRead) {
+            this.markNotificationAsRead(root, item.id);
+        }
+
+        const data = item.data || {};
+        switch (item.actionType) {
+            case 'friends_incoming':
+                this.switchTab(root, 'friends');
+                this.state.activeFriendsSubTab = 'incoming';
+                this.renderFriendsTab(root);
+                break;
+
+            case 'open_chat':
+                if (data.friend_id || data.sender_id) {
+                    const peerId = data.friend_id || data.sender_id;
+                    const res = await chatService.createDirectConversation(peerId);
+                    if (res.success) {
+                        await this.loadConversations(root);
+                        const target = this.state.conversations.find(c => c.id === res.conversationId);
+                        if (target) {
+                            this.switchTab(root, 'chats');
+                            this.selectConversation(root, target);
+                        }
+                    }
+                } else {
+                    this.switchTab(root, 'friends');
+                }
+                break;
+
+            case 'open_conversation':
+                if (data.conversation_id) {
+                    await this.loadConversations(root);
+                    const target = this.state.conversations.find(c => c.id === data.conversation_id);
+                    if (target) {
+                        this.switchTab(root, 'chats');
+                        this.selectConversation(root, target);
+                    } else {
+                        this.switchTab(root, 'chats');
+                    }
+                } else {
+                    this.switchTab(root, 'chats');
+                }
+                break;
+
+            case 'open_group':
+                if (data.group_id) {
+                    await this.loadConversations(root);
+                    const target = this.state.conversations.find(c => c.id === data.group_id);
+                    if (target) {
+                        this.switchTab(root, 'chats');
+                        this.selectConversation(root, target);
+                    } else {
+                        this.switchTab(root, 'groups');
+                    }
+                } else {
+                    this.switchTab(root, 'groups');
+                }
+                break;
+
+            case 'open_security':
+                router.navigate('#/settings/security');
+                break;
+
+            case 'dismiss':
+                break;
+
+            default:
+                break;
+        }
     },
 
     /**
@@ -3525,6 +3968,18 @@ export const AppView = {
         } catch (err) {
             console.warn('[AppView] Social realtime listener error:', err);
         }
+
+        // Realtime notifications updates
+        try {
+            const user = this.state.currentUser;
+            if (user) {
+                this.unsubscribeNotifications = notificationService.subscribe(user.id, (eventType, record) => {
+                    this.handleRealtimeNotification(root, eventType, record);
+                });
+            }
+        } catch (err) {
+            console.warn('[AppView] Notification realtime listener error:', err);
+        }
     },
 
     filterSidebarItems(root, query) {
@@ -3698,6 +4153,11 @@ export const AppView = {
         if (this.socialChannel && typeof this.socialChannel.unsubscribe === 'function') {
             this.socialChannel.unsubscribe();
         }
+        if (this.unsubscribeNotifications) {
+            this.unsubscribeNotifications();
+            this.unsubscribeNotifications = null;
+        }
+        notificationService.cleanup();
         realtimeService.cleanup();
     }
 };

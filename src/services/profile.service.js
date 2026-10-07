@@ -7,6 +7,7 @@ import { supabase } from '../core/supabase.js';
 import { CONFIG } from '../config.js';
 import { storageService } from './storage.service.js';
 import { authService } from './auth.service.js';
+import { notificationService } from './notification.service.js';
 
 class ProfileService {
     /**
@@ -297,6 +298,13 @@ class ProfileService {
                     daysRemaining: data.days_remaining
                 };
             }
+
+            // Dispatch security alert for username change
+            notificationService.sendSecurityAlert({
+                title: 'Username Changed',
+                body: `Your username was successfully changed to @${data?.new_username || cleaned}.`,
+                data: { event: 'username_change', new_username: data?.new_username || cleaned }
+            }).catch(e => console.warn('[ProfileService] Security alert dispatch non-fatal error:', e));
 
             return {
                 success: true,
