@@ -51,6 +51,40 @@ export const SplashView = {
                         Login
                     </button>
                 </div>
+
+                <div style="margin-top: 1.5rem; text-align: center;">
+                    <button type="button" id="btn-config-backend" style="background: none; border: none; font-size: 0.775rem; color: #94a3b8; cursor: pointer; text-decoration: underline;" aria-label="Configure Supabase Backend">
+                        ⚙️ Configure Supabase Backend
+                    </button>
+                </div>
+            </div>
+
+            <!-- Backend Config Modal -->
+            <div id="splash-backend-modal" class="modal-overlay" style="display: none;">
+                <div class="modal-dialog">
+                    <div class="modal-dialog-header">
+                        <h3 class="modal-dialog-title">Supabase Backend Settings</h3>
+                        <button type="button" id="btn-close-backend-modal" class="btn-icon" aria-label="Close modal">✕</button>
+                    </div>
+                    <div class="modal-dialog-body">
+                        <p style="font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 1rem;">
+                            Set your Supabase project URL and public Anon key for local testing.
+                        </p>
+                        <div class="form-group" style="margin-bottom: 0.75rem;">
+                            <label class="form-label">Supabase URL</label>
+                            <input type="url" id="cfg-supabase-url" class="form-input" placeholder="https://your-project.supabase.co" />
+                        </div>
+                        <div class="form-group" style="margin-bottom: 1rem;">
+                            <label class="form-label">Supabase Anon Key</label>
+                            <input type="text" id="cfg-supabase-key" class="form-input" placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..." />
+                        </div>
+                        <div style="display: flex; gap: 0.5rem; justify-content: flex-end;">
+                            <button type="button" id="btn-save-backend-cfg" class="btn-primary" style="min-height: 38px; font-size: 0.875rem;">
+                                Save & Connect
+                            </button>
+                        </div>
+                    </div>
+                </div>
             </div>
         `;
 
@@ -65,6 +99,29 @@ export const SplashView = {
 
         root.querySelector('#btn-splash-login').addEventListener('click', () => {
             router.navigate('#/auth/login');
+        });
+
+        const modal = root.querySelector('#splash-backend-modal');
+        const urlInput = root.querySelector('#cfg-supabase-url');
+        const keyInput = root.querySelector('#cfg-supabase-key');
+
+        root.querySelector('#btn-config-backend')?.addEventListener('click', () => {
+            urlInput.value = localStorage.getItem('imd_supabase_url') || '';
+            keyInput.value = localStorage.getItem('imd_supabase_anon_key') || '';
+            modal.style.display = 'flex';
+        });
+
+        root.querySelector('#btn-close-backend-modal')?.addEventListener('click', () => {
+            modal.style.display = 'none';
+        });
+
+        root.querySelector('#btn-save-backend-cfg')?.addEventListener('click', () => {
+            const u = urlInput.value.trim();
+            const k = keyInput.value.trim();
+            if (u) localStorage.setItem('imd_supabase_url', u);
+            if (k) localStorage.setItem('imd_supabase_anon_key', k);
+            alert('Supabase backend settings saved. Reloading application...');
+            window.location.reload();
         });
     }
 };
