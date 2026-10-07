@@ -52,14 +52,17 @@ class Router {
         const rawHash = window.location.hash || '#/';
         const path = rawHash.split('?')[0];
 
-        // Default root landing redirect
+        // Default root landing
         if (path === '#/' || path === '#' || path === '') {
             const session = await authService.getSession();
-            this.navigate(session ? '#/app' : '#/auth/login');
-            return;
+            if (session) {
+                this.navigate('#/app');
+                return;
+            }
+            // Fall through to render registered '#/' route (SplashView)
         }
 
-        const routeConfig = this.routes[path] || this.routes['#/auth/login'];
+        const routeConfig = this.routes[path] || this.routes['#/'];
         if (!routeConfig) return;
 
         const session = await authService.getSession();

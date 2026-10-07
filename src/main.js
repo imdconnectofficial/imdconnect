@@ -3,6 +3,8 @@
 // ==============================================================================
 import { router } from './core/router.js';
 import { authService } from './services/auth.service.js';
+import { SplashView } from './views/splash.view.js';
+import { AppView } from './views/app/app.view.js';
 import { LoginView } from './views/auth/login.view.js';
 import { RegisterView } from './views/auth/register.view.js';
 import { ForgotPasswordView } from './views/auth/forgot-password.view.js';
@@ -29,6 +31,11 @@ async function bootstrap() {
     }
 
     // 3. Register Routes with Route Guards
+    router.register('#/', {
+        view: SplashView,
+        requiresGuest: true
+    });
+
     router.register('#/auth/login', {
         view: LoginView,
         requiresGuest: true
@@ -53,6 +60,11 @@ async function bootstrap() {
     });
 
     router.register('#/app', {
+        view: AppView,
+        requiresAuth: true
+    });
+
+    router.register('#/app/account', {
         view: DashboardView,
         requiresAuth: true
     });
