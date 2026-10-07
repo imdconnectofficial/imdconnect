@@ -369,6 +369,13 @@ class AuthService {
      */
     async logoutAllSessions() {
         try {
+            // Revoke active sessions in user_sessions table
+            try {
+                await supabase.rpc('revoke_all_user_sessions');
+            } catch (rpcErr) {
+                console.warn('[AuthService] Could not invoke revoke_all_user_sessions RPC:', rpcErr);
+            }
+
             const { error } = await supabase.auth.signOut({ scope: 'global' });
             if (error) throw error;
             return { success: true };

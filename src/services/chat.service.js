@@ -221,6 +221,9 @@ class ChatService {
 
         const trimmedText = (text || '').trim();
         if (!trimmedText) return { success: false, error: 'Cannot send empty message.' };
+        if (trimmedText.length > 5000) {
+            return { success: false, error: 'Message exceeds maximum length of 5000 characters.' };
+        }
 
         try {
             const nowIso = new Date().toISOString();

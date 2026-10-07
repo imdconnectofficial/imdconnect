@@ -302,6 +302,38 @@ class SettingsService {
     }
 
     /**
+     * Revoke all active sessions for caller (database-level invalidation)
+     * @param {string|null} [exceptSessionId=null]
+     * @returns {Promise<{ success: boolean, count?: number, error?: string }>}
+     */
+    async revokeAllSessions(exceptSessionId = null) {
+        const user = await authService.getUser();
+        if (!user) return { success: false, error: 'Unauthenticated' };
+
+        try {
+            const { data, error } = await supabase.rpc('revoke_all_user_sessions', {
+                p_except_session_id: exceptSessionId || null
+            });
+
+            if (!error) return { success: true, count: data };
+
+            let query = supabase
+                .from('user_sessions')
+                .update({ is_revoked: true })
+                .eq('user_id', user.id);
+            if (exceptSessionId) {
+                query = query.neq('id', exceptSessionId);
+            }
+            const { error: updErr } = await query;
+            if (updErr) throw updErr;
+            return { success: true };
+        } catch (err) {
+            console.error('[SettingsService] revokeAllSessions error:', err);
+            return { success: false, error: err.message };
+        }
+    }
+
+    /**
      * Get login history audit trail
      * @param {number} [limit=20]
      * @returns {Promise<Array>}

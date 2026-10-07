@@ -3,11 +3,13 @@
 # ==============================================================================
 
 # 1. Environment & Secrets (NEVER COMMIT)
+.env*
 .env
 .env.*
 !.env.example
 *.env
 *.local
+.secret*
 *.secret
 *.secrets
 secrets/

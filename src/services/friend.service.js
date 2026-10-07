@@ -350,6 +350,17 @@ class FriendService {
      */
     async _fallbackSendFriendRequest(callerId, targetUserId) {
         try {
+            // Check target privacy settings
+            const { data: targetPrivacy } = await supabase
+                .from('privacy_settings')
+                .select('friend_request_permissions')
+                .eq('user_id', targetUserId)
+                .maybeSingle();
+
+            if (targetPrivacy && targetPrivacy.friend_request_permissions === 'nobody') {
+                return { success: false, error: 'This user does not accept friend requests.' };
+            }
+
             // Check mutual reverse request
             const { data: mutual } = await supabase
                 .from('friend_requests')
