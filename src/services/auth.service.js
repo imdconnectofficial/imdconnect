@@ -456,6 +456,38 @@ class AuthService {
     }
 
     /**
+     * Get Current Authenticated User Profile
+     * @returns {Promise<Object|null>}
+     */
+    async getProfile() {
+        try {
+            const user = await this.getUser();
+            if (!user) return null;
+            const { data } = await supabase
+                .from('profiles')
+                .select('*')
+                .eq('id', user.id)
+                .single();
+            return data;
+        } catch (err) {
+            return null;
+        }
+    }
+
+    /**
+     * Check if authenticated user has admin/moderator role
+     * @returns {Promise<boolean>}
+     */
+    async isAdmin() {
+        try {
+            const profile = await this.getProfile();
+            return profile && (profile.role === 'admin' || profile.role === 'moderator');
+        } catch (err) {
+            return false;
+        }
+    }
+
+    /**
      * Subscribe to Auth State Changes
      * @param {Function} callback 
      * @returns {{ unsubscribe: Function }}

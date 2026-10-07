@@ -1262,3 +1262,121 @@ input:checked + .slider:before {
     border-color: var(--accent);
     font-weight: 600;
 }
+
+/* ------------------------------------------------------------------------------
+   Settings Shell & Admin Layout
+   ------------------------------------------------------------------------------ */
+.settings-shell-container {
+    display: flex;
+    width: 100vw;
+    height: 100vh;
+    overflow: hidden;
+}
+
+.settings-sidebar {
+    width: 280px;
+    min-width: 260px;
+    height: 100vh;
+    background-color: var(--bg-surface);
+    border-right: 1px solid var(--border-color);
+    display: flex;
+    flex-direction: column;
+    overflow-y: auto;
+    z-index: 10;
+}
+
+.settings-sidebar-header {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 1.25rem 1.25rem 0.85rem 1.25rem;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.settings-nav-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    padding: 0.85rem 0.75rem;
+}
+
+.settings-nav-item {
+    display: flex;
+    align-items: center;
+    gap: 0.85rem;
+    padding: 0.65rem 0.85rem;
+    border-radius: var(--radius-md);
+    color: var(--text-secondary);
+    text-decoration: none;
+    transition: background var(--transition-fast), color var(--transition-fast);
+}
+
+.settings-nav-item:hover {
+    background-color: var(--bg-hover);
+    color: var(--text-primary);
+}
+
+.settings-nav-item.active {
+    background-color: var(--accent-light);
+    color: var(--accent);
+    font-weight: 600;
+}
+
+.settings-nav-icon {
+    font-size: 1.25rem;
+}
+
+.settings-nav-label {
+    font-size: 0.9rem;
+    line-height: 1.2;
+}
+
+.settings-nav-sub {
+    font-size: 0.725rem;
+    color: var(--text-muted);
+}
+
+.settings-content-pane {
+    flex: 1;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    background-color: var(--bg-page);
+}
+
+.settings-content-header {
+    height: 68px;
+    background-color: var(--bg-surface);
+    border-bottom: 1px solid var(--border-color);
+    display: flex;
+    align-items: center;
+    padding: 0 1.5rem;
+    z-index: 5;
+}
+
+.settings-content-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 1.5rem;
+}
+
+@media (max-width: 900px) {
+    .settings-shell-container {
+        flex-direction: column;
+    }
+
+    .settings-sidebar {
+        display: none; /* Managed by mobile back links */
+    }
+
+    .settings-content-pane {
+        width: 100%;
+        height: 100vh;
+    }
+
+    #btn-mobile-settings-back {
+        display: flex !important;
+    }
+}
+

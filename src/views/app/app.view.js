@@ -65,12 +65,24 @@ export const AppView = {
             };
         }
 
+        // Determine active tab from URL hash
+        const currentHash = window.location.hash || '';
+        if (currentHash.startsWith('#/friends')) this.state.activeTab = 'friends';
+        else if (currentHash.startsWith('#/groups')) this.state.activeTab = 'groups';
+        else if (currentHash.startsWith('#/notifications')) this.state.activeTab = 'notifications';
+        else if (currentHash.startsWith('#/profile')) this.state.activeTab = 'profile';
+        else if (currentHash.startsWith('#/settings')) this.state.activeTab = 'settings';
+        else this.state.activeTab = 'chats';
+
+        const isAdmin = this.state.currentProfile && 
+            (this.state.currentProfile.role === 'admin' || this.state.currentProfile.role === 'moderator');
+
         // Render Master 3-Pane Desktop & Mobile Base Structure
         container.innerHTML = `
             <!-- Left Sidebar Navigation & Chat List -->
             <aside class="sidebar-panel" id="sidebar-panel">
                 <header class="sidebar-header">
-                    <a href="#/app" class="brand-logo" id="brand-logo-btn">
+                    <a href="#/chats" class="brand-logo" id="brand-logo-btn">
                         <div class="brand-icon-box" aria-hidden="true">
                             <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
                                 <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"></path>
@@ -99,32 +111,38 @@ export const AppView = {
 
                 <!-- Desktop Navigation Pills -->
                 <nav class="sidebar-nav-pills" aria-label="Sidebar Sections">
-                    <button type="button" class="nav-pill-btn active" data-tab="chats">
+                    <button type="button" class="nav-pill-btn ${this.state.activeTab === 'chats' ? 'active' : ''}" data-tab="chats">
                         <span>💬</span>
                         <span>Chats</span>
                         <span class="nav-pill-badge" id="badge-chats" style="display: none;">0</span>
                     </button>
-                    <button type="button" class="nav-pill-btn" data-tab="friends">
+                    <button type="button" class="nav-pill-btn ${this.state.activeTab === 'friends' ? 'active' : ''}" data-tab="friends">
                         <span>👥</span>
                         <span>Friends</span>
                     </button>
-                    <button type="button" class="nav-pill-btn" data-tab="groups">
+                    <button type="button" class="nav-pill-btn ${this.state.activeTab === 'groups' ? 'active' : ''}" data-tab="groups">
                         <span>👥</span>
                         <span>Groups</span>
                     </button>
-                    <button type="button" class="nav-pill-btn" data-tab="notifications">
+                    <button type="button" class="nav-pill-btn ${this.state.activeTab === 'notifications' ? 'active' : ''}" data-tab="notifications">
                         <span>🔔</span>
                         <span>Notifications</span>
                         <span class="nav-pill-badge badge-danger" id="badge-notifications" style="display: none;">0</span>
                     </button>
-                    <button type="button" class="nav-pill-btn" data-tab="profile">
+                    <button type="button" class="nav-pill-btn ${this.state.activeTab === 'profile' ? 'active' : ''}" data-tab="profile">
                         <span>👤</span>
                         <span>Profile</span>
                     </button>
-                    <button type="button" class="nav-pill-btn" data-tab="settings">
+                    <button type="button" class="nav-pill-btn ${this.state.activeTab === 'settings' ? 'active' : ''}" data-tab="settings">
                         <span>⚙️</span>
                         <span>Settings</span>
                     </button>
+                    ${isAdmin ? `
+                        <a href="#/admin" class="nav-pill-btn" style="color: var(--accent); font-weight: 600; text-decoration: none;">
+                            <span>🛡️</span>
+                            <span>Admin Portal</span>
+                        </a>
+                    ` : ''}
                 </nav>
 
                 <div class="sidebar-section-header" id="sidebar-section-title">Recent Chats</div>
@@ -398,13 +416,27 @@ export const AppView = {
             const query = searchInput.value.trim().toLowerCase();
             this.filterSidebarItems(root, query);
         });
+
+        // Listen for browser back/forward or deep hash changes
+        this._hashHandler = () => {
+            const hash = window.location.hash || '';
+            const match = ['chats', 'friends', 'groups', 'notifications', 'profile', 'settings'].find(t => hash.startsWith(`#/${t}`));
+            if (match && match !== this.state.activeTab) {
+                this.switchTab(root, match, false);
+            }
+        };
+        window.addEventListener('hashchange', this._hashHandler);
     },
 
     /**
      * Switch Active Navigation Tab
      */
-    switchTab(root, tab) {
+    switchTab(root, tab, updateHash = true) {
         this.state.activeTab = tab;
+
+        if (updateHash && window.location.hash !== `#/${tab}`) {
+            window.location.hash = `#/${tab}`;
+        }
 
         // Update Desktop Sidebar Pills
         root.querySelectorAll('.nav-pill-btn').forEach(btn => {
@@ -869,11 +901,11 @@ export const AppView = {
             });
 
             list.querySelector('#row-prof-privacy').addEventListener('click', () => {
-                this.showPrivacyModal(root);
+                router.navigate('#/settings/privacy');
             });
 
             list.querySelector('#row-prof-account').addEventListener('click', () => {
-                router.navigate('#/app/account');
+                router.navigate('#/settings/account');
             });
 
         } else if (this.state.activeTab === 'settings') {
@@ -883,6 +915,7 @@ export const AppView = {
             const username = p.username || 'user';
             const currentTheme = localStorage.getItem('imd_theme') || 'system';
             const themeLabel = currentTheme === 'light' ? 'Light' : (currentTheme === 'dark' ? 'Dark' : 'System Default');
+            const isAdmin = p.role === 'admin' || p.role === 'moderator';
 
             list.innerHTML = `
                 <div class="mobile-view-wrapper">
@@ -931,6 +964,22 @@ export const AppView = {
                                 <span>›</span>
                             </div>
                         </div>
+                        <div class="settings-row" id="row-settings-sec">
+                            <div class="settings-row-left">
+                                <span>🔐</span>
+                                <span>Security Settings</span>
+                            </div>
+                            <span style="color: var(--text-muted);">›</span>
+                        </div>
+                        ${isAdmin ? `
+                            <div class="settings-row" id="row-settings-admin" style="background: rgba(37, 99, 235, 0.05); color: var(--accent); font-weight: 600;">
+                                <div class="settings-row-left">
+                                    <span>🛡️</span>
+                                    <span>Admin Portal</span>
+                                </div>
+                                <span>›</span>
+                            </div>
+                        ` : ''}
                         <div class="settings-row" id="row-settings-help">
                             <div class="settings-row-left">
                                 <span>❓</span>
@@ -950,24 +999,34 @@ export const AppView = {
             `;
 
             list.querySelector('#settings-user-card-click').addEventListener('click', () => {
-                this.switchTab(root, 'profile');
+                router.navigate('#/settings/account');
             });
 
             list.querySelector('#row-settings-account').addEventListener('click', () => {
-                router.navigate('#/app/account');
+                router.navigate('#/settings/account');
             });
 
             list.querySelector('#row-settings-privacy').addEventListener('click', () => {
-                this.showPrivacyModal(root);
+                router.navigate('#/settings/privacy');
             });
 
             list.querySelector('#row-settings-notif').addEventListener('click', () => {
-                alert('All chat notifications are strictly end-to-end encrypted and delivered via Supabase Realtime.');
+                router.navigate('#/settings/notifications');
             });
 
             list.querySelector('#row-settings-theme').addEventListener('click', () => {
-                this.cycleTheme();
+                router.navigate('#/settings/theme');
             });
+
+            list.querySelector('#row-settings-sec').addEventListener('click', () => {
+                router.navigate('#/settings/security');
+            });
+
+            if (isAdmin) {
+                list.querySelector('#row-settings-admin')?.addEventListener('click', () => {
+                    router.navigate('#/admin');
+                });
+            }
 
             list.querySelector('#row-settings-help').addEventListener('click', () => {
                 alert('ImdConnect text-only platform.\nFor privacy queries: security@auth.imdconnect.local');
@@ -975,7 +1034,7 @@ export const AppView = {
 
             list.querySelector('#row-settings-logout').addEventListener('click', async () => {
                 await authService.logout();
-                router.navigate('#/auth/login');
+                router.navigate('#/login');
             });
 
         } else if (this.state.activeTab === 'notifications') {
@@ -1304,6 +1363,9 @@ export const AppView = {
     },
 
     unmount() {
+        if (this._hashHandler) {
+            window.removeEventListener('hashchange', this._hashHandler);
+        }
         if (this.unsubscribeRealtime) {
             this.unsubscribeRealtime();
         }
