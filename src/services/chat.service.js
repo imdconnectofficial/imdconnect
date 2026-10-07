@@ -105,6 +105,7 @@ class ChatService {
                     isOnline,
                     isMuted,
                     hasUnread,
+                    isPrivacyMode: !!conv.is_privacy_mode || (membership ? !!membership.is_privacy_mode : false),
                     disappearingTimer: conv.disappearing_timer,
                     membership,
                     lastMessage: lastMsg ? lastMsg.ciphertext : 'No messages yet',
@@ -658,6 +659,45 @@ class ChatService {
 
             return { success: true };
         } catch (err) {
+            return { success: false, error: err.message };
+        }
+    }
+
+    /**
+     * Toggle Privacy Chat Mode for a conversation
+     * @param {string} conversationId 
+     * @returns {Promise<{ success: boolean, isPrivacyMode?: boolean, error?: string }>}
+     */
+    async togglePrivacyMode(conversationId) {
+        const user = await authService.getUser();
+        if (!user || !conversationId) return { success: false, error: 'Authentication required.' };
+
+        try {
+            // Primary: call RPC toggle_conversation_privacy_mode
+            const { data, error } = await supabase.rpc('toggle_conversation_privacy_mode', {
+                p_conversation_id: conversationId
+            });
+
+            if (!error && data?.success) {
+                return { success: true, isPrivacyMode: data.is_privacy_mode };
+            }
+
+            // Fallback direct table update
+            const { data: conv } = await supabase
+                .from('conversations')
+                .select('is_privacy_mode')
+                .eq('id', conversationId)
+                .single();
+
+            const nextStatus = !(conv?.is_privacy_mode);
+            await supabase
+                .from('conversations')
+                .update({ is_privacy_mode: nextStatus, updated_at: new Date().toISOString() })
+                .eq('id', conversationId);
+
+            return { success: true, isPrivacyMode: nextStatus };
+        } catch (err) {
+            console.error('[ChatService] togglePrivacyMode error:', err);
             return { success: false, error: err.message };
         }
     }

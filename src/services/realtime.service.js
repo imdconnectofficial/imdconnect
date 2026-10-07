@@ -104,7 +104,21 @@ class RealtimeService {
             }
         });
 
-        // 6. Presence tracking (Online/Offline)
+        // 6. Ephemeral broadcast for screenshot attempt privacy alert
+        channel.on('broadcast', { event: 'privacy_alert' }, (event) => {
+            if (typeof handlers.onPrivacyAlert === 'function') {
+                handlers.onPrivacyAlert(event.payload);
+            }
+        });
+
+        // 7. Ephemeral broadcast for privacy mode toggle sync
+        channel.on('broadcast', { event: 'privacy_mode' }, (event) => {
+            if (typeof handlers.onPrivacyMode === 'function') {
+                handlers.onPrivacyMode(event.payload);
+            }
+        });
+
+        // 8. Presence tracking (Online/Offline)
         channel.on('presence', { event: 'sync' }, () => {
             if (typeof handlers.onPresence === 'function') {
                 const state = channel.presenceState();
@@ -191,6 +205,54 @@ class RealtimeService {
             });
         } catch (err) {
             console.warn('[RealtimeService] broadcastReceipt error:', err);
+        }
+    }
+
+    /**
+     * Broadcast privacy alert (e.g. screenshot attempt)
+     * @param {string} conversationId 
+     * @param {Object} payload 
+     */
+    async broadcastPrivacyAlert(conversationId, payload) {
+        const channelName = `conversation:${conversationId}`;
+        const channel = this.activeChannels.get(channelName);
+        if (!channel) return;
+
+        try {
+            await channel.send({
+                type: 'broadcast',
+                event: 'privacy_alert',
+                payload: {
+                    ...payload,
+                    timestamp: new Date().toISOString()
+                }
+            });
+        } catch (err) {
+            console.warn('[RealtimeService] broadcastPrivacyAlert failed:', err);
+        }
+    }
+
+    /**
+     * Broadcast privacy mode toggle (enabled / disabled)
+     * @param {string} conversationId 
+     * @param {Object} payload 
+     */
+    async broadcastPrivacyMode(conversationId, payload) {
+        const channelName = `conversation:${conversationId}`;
+        const channel = this.activeChannels.get(channelName);
+        if (!channel) return;
+
+        try {
+            await channel.send({
+                type: 'broadcast',
+                event: 'privacy_mode',
+                payload: {
+                    ...payload,
+                    timestamp: new Date().toISOString()
+                }
+            });
+        } catch (err) {
+            console.warn('[RealtimeService] broadcastPrivacyMode failed:', err);
         }
     }
 

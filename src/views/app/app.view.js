@@ -163,6 +163,10 @@ export const AppView = {
                     </div>
 
                     <div class="chat-header-actions" id="chat-header-actions" style="display: none;">
+                        <button type="button" id="header-privacy-badge" class="privacy-mode-badge" style="display: none;" title="Privacy Chat Active (Click for info)">
+                            <span>🛡️ Privacy Chat</span>
+                            <span class="privacy-mode-badge-info-icon">ℹ️</span>
+                        </button>
                         <button type="button" class="btn-icon" id="btn-chat-search" title="Search messages" aria-label="Search messages">🔍</button>
                         <button type="button" class="btn-icon" title="Audio disabled in text platform" style="opacity: 0.4; cursor: not-allowed;" aria-label="Call disabled">📞</button>
                         <button type="button" class="btn-icon" id="btn-chat-info-toggle" title="Conversation Details" aria-label="Details">ℹ️</button>
@@ -255,13 +259,13 @@ export const AppView = {
                         <span style="color: var(--text-muted);">›</span>
                     </div>
 
-                    <div class="info-list-row">
+                    <div class="info-list-row" id="row-privacy-mode" style="cursor: pointer;">
                         <div>
-                            <div>Privacy Mode</div>
-                            <div style="font-size: 0.75rem; color: var(--text-muted);">Hide presence in this chat</div>
+                            <div>Privacy Chat Mode</div>
+                            <div style="font-size: 0.75rem; color: var(--text-muted);" id="privacy-mode-subtext">Restricts copy, selection & attempts detection</div>
                         </div>
-                        <label class="switch" aria-label="Privacy mode toggle">
-                            <input type="checkbox" id="toggle-privacy-mode" checked />
+                        <label class="switch" aria-label="Privacy mode toggle" style="pointer-events: auto;">
+                            <input type="checkbox" id="toggle-privacy-mode" />
                             <span class="slider"></span>
                         </label>
                     </div>
@@ -309,6 +313,9 @@ export const AppView = {
                     <span>Profile</span>
                 </a>
             </nav>
+
+            <!-- Privacy Toast Container -->
+            <div id="privacy-toast-container" class="privacy-toast-container" aria-live="polite"></div>
 
             <!-- Modal Container -->
             <div id="modal-container" style="display: none;"></div>
@@ -467,6 +474,117 @@ export const AppView = {
             const query = searchInput.value.trim().toLowerCase();
             this.filterSidebarItems(root, query);
         });
+
+        // -------------------------------------------------------------
+        // Privacy Chat Mode Toggle & Info Modal
+        // -------------------------------------------------------------
+        const privacyToggle = root.querySelector('#toggle-privacy-mode');
+        const privacyRow = root.querySelector('#row-privacy-mode');
+        if (privacyToggle && privacyRow) {
+            const handlePrivacyToggle = async (e) => {
+                if (!this.state.activeConversation) return;
+                if (e.target !== privacyToggle) {
+                    privacyToggle.checked = !privacyToggle.checked;
+                }
+                const conv = this.state.activeConversation;
+                const res = await chatService.togglePrivacyMode(conv.id);
+                if (res.success) {
+                    conv.isPrivacyMode = res.isPrivacyMode;
+                    privacyToggle.checked = !!conv.isPrivacyMode;
+                    this.applyPrivacyChatMode(root, conv);
+                    // Broadcast to peer in this active conversation
+                    realtimeService.broadcastPrivacyMode(conv.id, {
+                        conversationId: conv.id,
+                        isPrivacyMode: conv.isPrivacyMode,
+                        toggledBy: this.state.currentProfile?.username || 'User'
+                    });
+                    const noticeText = conv.isPrivacyMode 
+                        ? '🛡️ Privacy Chat Mode enabled (Copy/selection restricted)' 
+                        : '🛡️ Privacy Chat Mode disabled';
+                    this.appendSystemNotice(root, noticeText, conv.isPrivacyMode ? '' : 'notice-warning');
+                    this.showPrivacyToast(noticeText);
+                } else {
+                    privacyToggle.checked = !privacyToggle.checked;
+                    this.showPrivacyToast('Failed to update Privacy Mode');
+                }
+            };
+
+            privacyToggle.addEventListener('change', handlePrivacyToggle);
+            privacyRow.addEventListener('click', (e) => {
+                if (e.target === privacyToggle || e.target.closest('.switch')) return;
+                handlePrivacyToggle(e);
+            });
+        }
+
+        root.querySelector('#header-privacy-badge')?.addEventListener('click', () => {
+            this.showPrivacyModeInfoModal(root);
+        });
+
+        // -------------------------------------------------------------
+        // Privacy Chat Mode: Copy, Cut, Selection, Drag Restrictions
+        // -------------------------------------------------------------
+        const chatPanel = root.querySelector('#chat-panel');
+        if (chatPanel) {
+            const handleRestrictedAction = (e, actionName) => {
+                if (!this.state.activeConversation?.isPrivacyMode) return;
+                // Allow normal editing within the message input textarea/input
+                if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA')) {
+                    return;
+                }
+                // Only restrict chat content (bubbles, feed)
+                if (e.target && (e.target.closest('.message-bubble') || e.target.closest('.messages-feed'))) {
+                    e.preventDefault();
+                    if (e.clipboardData) {
+                        e.clipboardData.clearData();
+                    }
+                    this.showPrivacyToast(`🔒 ${actionName} restricted in Privacy Chat Mode`);
+                }
+            };
+
+            chatPanel.addEventListener('copy', (e) => handleRestrictedAction(e, 'Copying'));
+            chatPanel.addEventListener('cut', (e) => handleRestrictedAction(e, 'Cutting'));
+            chatPanel.addEventListener('dragstart', (e) => handleRestrictedAction(e, 'Dragging/Forwarding'));
+            chatPanel.addEventListener('contextmenu', (e) => {
+                if (!this.state.activeConversation?.isPrivacyMode) return;
+                if (e.target && e.target.closest('.message-bubble')) {
+                    e.preventDefault();
+                    this.showPrivacyToast('🔒 Context menu restricted in Privacy Chat Mode');
+                }
+            });
+        }
+
+        // -------------------------------------------------------------
+        // Privacy Chat Mode: Best-Effort Screenshot Attempt Detection
+        // -------------------------------------------------------------
+        this._lastScreenshotAlert = 0;
+        this._keydownHandler = (e) => {
+            if (!this.state.activeConversation?.isPrivacyMode) return;
+
+            // Detect standard screenshot shortcut patterns:
+            // PrintScreen, Ctrl+Shift+S / Meta+Shift+S (Snipping Tool), Meta+Shift+3/4/5 (macOS)
+            const isPrintScreen = e.key === 'PrintScreen';
+            const isWindowsSnipping = (e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 's' || e.key === 'S');
+            const isMacScreenshot = e.metaKey && e.shiftKey && ['3', '4', '5'].includes(e.key);
+
+            if (isPrintScreen || isWindowsSnipping || isMacScreenshot) {
+                const now = Date.now();
+                // 3 second throttle to prevent spam
+                if (now - this._lastScreenshotAlert > 3000) {
+                    this._lastScreenshotAlert = now;
+                    const alertMsg = '⚠️ Screenshot shortcut attempt detected (Best-effort detection)';
+                    this.showPrivacyToast(alertMsg);
+                    this.appendSystemNotice(root, alertMsg, 'notice-alert');
+
+                    // Broadcast alert to peer in active conversation
+                    realtimeService.broadcastPrivacyAlert(this.state.activeConversation.id, {
+                        conversationId: this.state.activeConversation.id,
+                        actorUsername: this.state.currentProfile?.username || 'User',
+                        type: 'screenshot_shortcut'
+                    });
+                }
+            }
+        };
+        window.addEventListener('keydown', this._keydownHandler);
 
         // Listen for browser back/forward or deep hash changes
         this._hashHandler = () => {
@@ -675,6 +793,9 @@ export const AppView = {
             banner.style.display = 'none';
         }
 
+        // Apply Privacy Chat Mode UI styling & badge
+        this.applyPrivacyChatMode(root, conv);
+
         // Update Right Info Panel
         this.updateInfoPanel(root, conv);
 
@@ -746,6 +867,24 @@ export const AppView = {
                 if (payload && payload.userId !== this.state.currentUser?.id) {
                     this.showPeerTypingIndicator(root, payload.username || conv.title, !!payload.isTyping);
                 }
+            },
+            onPrivacyAlert: (payload) => {
+                if (this.state.activeConversation?.id !== conv.id) return;
+                const actor = payload?.actorUsername ? `@${payload.actorUsername}` : 'Peer';
+                const alertText = `⚠️ Screenshot attempt detected by ${actor} (Best-effort detection)`;
+                this.appendSystemNotice(root, alertText, 'notice-alert');
+                this.showPrivacyToast(alertText);
+            },
+            onPrivacyMode: (payload) => {
+                if (this.state.activeConversation?.id !== conv.id) return;
+                conv.isPrivacyMode = !!payload.isPrivacyMode;
+                this.applyPrivacyChatMode(root, conv);
+                const changer = payload?.toggledBy ? `@${payload.toggledBy}` : 'Peer';
+                const noticeText = conv.isPrivacyMode
+                    ? `🛡️ Privacy Chat Mode enabled by ${changer}`
+                    : `🛡️ Privacy Chat Mode disabled by ${changer}`;
+                this.appendSystemNotice(root, noticeText, conv.isPrivacyMode ? '' : 'notice-warning');
+                this.showPrivacyToast(noticeText);
             },
             onPresence: (state) => {
                 if (this.state.activeConversation?.id !== conv.id) return;
@@ -1053,6 +1192,12 @@ export const AppView = {
         if (muteLabel) muteLabel.textContent = conv.isMuted ? 'Unmute Notifications' : 'Mute Notifications';
         if (muteSub) muteSub.textContent = conv.isMuted ? 'Notifications are currently muted' : 'Silence alerts for this chat';
         if (muteIcon) muteIcon.textContent = conv.isMuted ? '🔕' : '🔔';
+
+        // Privacy Chat Mode state
+        const privacyToggle = root.querySelector('#toggle-privacy-mode');
+        if (privacyToggle) {
+            privacyToggle.checked = !!conv.isPrivacyMode;
+        }
 
         // Fetch peer profile details respecting privacy settings
         if (conv.peerUsername) {
@@ -2673,6 +2818,141 @@ export const AppView = {
         });
     },
 
+    /**
+     * Apply Privacy Chat Mode UI state & CSS classes
+     */
+    applyPrivacyChatMode(root, conv) {
+        const chatPanel = root.querySelector('#chat-panel');
+        const badge = root.querySelector('#header-privacy-badge');
+        const toggle = root.querySelector('#toggle-privacy-mode');
+        const isPrivacy = !!conv?.isPrivacyMode;
+
+        if (chatPanel) {
+            chatPanel.classList.toggle('privacy-chat-active', isPrivacy);
+        }
+        if (badge) {
+            badge.style.display = isPrivacy ? 'inline-flex' : 'none';
+        }
+        if (toggle) {
+            toggle.checked = isPrivacy;
+        }
+    },
+
+    /**
+     * Show Privacy Mode Information Modal with Honest Sandbox Transparency (Rule 20)
+     */
+    showPrivacyModeInfoModal(root) {
+        const modalContainer = root.querySelector('#modal-container');
+        if (!modalContainer) return;
+
+        modalContainer.innerHTML = `
+            <div class="modal-backdrop" id="privacy-info-modal-backdrop">
+                <div class="modal-content" style="max-width: 480px; text-align: left;">
+                    <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 1.25rem;">
+                        <h3 style="margin: 0; font-size: 1.2rem; display: flex; align-items: center; gap: 0.5rem;">
+                            <span>🛡️</span> Privacy Chat Mode
+                        </h3>
+                        <button type="button" class="btn-icon" id="btn-close-privacy-info" aria-label="Close modal">✕</button>
+                    </div>
+
+                    <p style="font-size: 0.875rem; color: var(--text-secondary); margin-bottom: 1rem; line-height: 1.5;">
+                        Privacy Chat Mode provides enhanced privacy controls and best-effort deterrents for confidential conversations:
+                    </p>
+
+                    <div style="display: flex; flex-direction: column; gap: 0.75rem; margin-bottom: 1.25rem;">
+                        <div style="display: flex; gap: 0.75rem; align-items: flex-start;">
+                            <span style="font-size: 1.1rem;">🚫</span>
+                            <div>
+                                <strong style="font-size: 0.85rem; display: block; color: var(--text-primary);">Copy & Selection Restricted</strong>
+                                <span style="font-size: 0.8rem; color: var(--text-muted);">Text copying, cutting, and dragging of message bubbles are disabled.</span>
+                            </div>
+                        </div>
+
+                        <div style="display: flex; gap: 0.75rem; align-items: flex-start;">
+                            <span style="font-size: 1.1rem;">⚡</span>
+                            <div>
+                                <strong style="font-size: 0.85rem; display: block; color: var(--text-primary);">Best-Effort Screenshot Detection</strong>
+                                <span style="font-size: 0.8rem; color: var(--text-muted);">Alerts peers when standard browser screenshot key combinations are pressed.</span>
+                            </div>
+                        </div>
+
+                        <div style="display: flex; gap: 0.75rem; align-items: flex-start;">
+                            <span style="font-size: 1.1rem;">🔔</span>
+                            <div>
+                                <strong style="font-size: 0.85rem; display: block; color: var(--text-primary);">Real-time Privacy Alerts</strong>
+                                <span style="font-size: 0.8rem; color: var(--text-muted);">Both participants receive instant in-chat notifications when privacy actions occur.</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div style="background: rgba(245, 158, 11, 0.1); border: 1px solid rgba(245, 158, 11, 0.25); border-radius: var(--radius-md); padding: 0.75rem; margin-bottom: 1.25rem; font-size: 0.775rem; color: #f59e0b; line-height: 1.45;">
+                        <strong>⚠️ Browser Sandbox Notice (Security Transparency):</strong><br/>
+                        Operating system-level capture tools, hardware capture cards, and external cameras cannot be detected or blocked by web browsers. Never rely on client-side screenshot detection for absolute secrecy.
+                    </div>
+
+                    <div style="display: flex; justify-content: flex-end;">
+                        <button type="button" class="btn btn-primary" id="btn-ack-privacy-info" style="min-width: 100px;">Got It</button>
+                    </div>
+                </div>
+            </div>
+        `;
+
+        modalContainer.style.display = 'flex';
+
+        const closeModal = () => {
+            modalContainer.style.display = 'none';
+            modalContainer.innerHTML = '';
+        };
+
+        modalContainer.querySelector('#btn-close-privacy-info')?.addEventListener('click', closeModal);
+        modalContainer.querySelector('#btn-ack-privacy-info')?.addEventListener('click', closeModal);
+        modalContainer.querySelector('#privacy-info-modal-backdrop')?.addEventListener('click', (e) => {
+            if (e.target.id === 'privacy-info-modal-backdrop') closeModal();
+        });
+    },
+
+    /**
+     * Display temporary floating privacy toast notice
+     */
+    showPrivacyToast(message) {
+        const container = document.querySelector('#privacy-toast-container');
+        if (!container) return;
+
+        const toast = document.createElement('div');
+        toast.className = 'privacy-toast';
+        toast.textContent = message;
+
+        container.appendChild(toast);
+
+        setTimeout(() => {
+            toast.style.transition = 'opacity 0.25s ease, transform 0.25s ease';
+            toast.style.opacity = '0';
+            toast.style.transform = 'translateY(8px) scale(0.96)';
+            setTimeout(() => toast.remove(), 250);
+        }, 3200);
+    },
+
+    /**
+     * Append in-feed system security notice
+     */
+    appendSystemNotice(root, text, modifierClass = '') {
+        const feed = root.querySelector('#messages-feed');
+        if (!feed) return;
+
+        const notice = document.createElement('div');
+        notice.className = `privacy-system-notice ${modifierClass}`.trim();
+        notice.textContent = text;
+
+        const typingEl = feed.querySelector('#feed-typing-indicator');
+        if (typingEl) {
+            feed.insertBefore(notice, typingEl);
+        } else {
+            feed.appendChild(notice);
+        }
+
+        feed.scrollTop = feed.scrollHeight;
+    },
+
     escapeHtml(str) {
         const div = document.createElement('div');
         div.textContent = str;
@@ -2682,6 +2962,10 @@ export const AppView = {
     unmount() {
         if (this._hashHandler) {
             window.removeEventListener('hashchange', this._hashHandler);
+        }
+        if (this._keydownHandler) {
+            window.removeEventListener('keydown', this._keydownHandler);
+            this._keydownHandler = null;
         }
         if (this.activeConvUnsubscribe) {
             this.activeConvUnsubscribe();
