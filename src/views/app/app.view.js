@@ -273,6 +273,14 @@ export const AppView = {
                         </div>
                         <span style="color: var(--accent); font-weight: 500;">Configure ›</span>
                     </div>
+
+                    <div class="info-list-row" id="row-conversation-mute" style="cursor: pointer;">
+                        <div>
+                            <div id="mute-label-text">Mute Notifications</div>
+                            <div style="font-size: 0.75rem; color: var(--text-muted);" id="mute-sub-text">Silence alerts for this chat</div>
+                        </div>
+                        <span id="mute-status-icon" style="font-size: 1.1rem;">🔔</span>
+                    </div>
                 </div>
             </aside>
 
@@ -353,8 +361,8 @@ export const AppView = {
         root.querySelector('#btn-start-chat-prompt')?.addEventListener('click', openNewChat);
 
         // Send Message Handler
-        const sendBtn = root.querySelector('#btn-send-message');
         const textInput = root.querySelector('#message-text-input');
+        const sendBtn = root.querySelector('#btn-send-message');
 
         const handleSend = async () => {
             if (!this.state.activeConversation) return;
@@ -371,22 +379,62 @@ export const AppView = {
 
             sendBtn.disabled = false;
             if (res.success) {
-                this.loadMessages(root, this.state.activeConversation.id);
+                // Instantly render outgoing message
+                this.appendMessageToFeed(root, {
+                    id: res.message?.id || ('temp-' + Date.now()),
+                    conversationId: this.state.activeConversation.id,
+                    senderId: this.state.currentUser?.id,
+                    isOutgoing: true,
+                    text,
+                    sentAt: new Date().toISOString(),
+                    deliveredAt: null,
+                    readAt: null,
+                    status: 'sent',
+                    timeFormatted: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+                    expiresAt: res.message?.expires_at,
+                    messageType: 'text'
+                });
+
+                // Clear typing indicator
+                realtimeService.broadcastTyping(this.state.activeConversation.id, {
+                    userId: this.state.currentUser?.id,
+                    username: this.state.currentProfile?.username || 'user',
+                    isTyping: false
+                });
+
+                this.loadConversations(root);
+            } else {
+                alert(res.error || 'Failed to send text message.');
             }
         };
 
         sendBtn.addEventListener('click', handleSend);
+
+        let typingDebounce = null;
         textInput.addEventListener('keydown', (e) => {
             if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
                 handleSend();
-            } else if (this.state.activeConversation) {
-                // Broadcast ephemeral typing indicator
-                realtimeService.broadcastTyping(
-                    this.state.activeConversation.id, 
-                    this.state.currentProfile?.username || 'user'
-                );
             }
+        });
+
+        textInput.addEventListener('input', () => {
+            if (!this.state.activeConversation || !this.state.currentUser) return;
+            realtimeService.broadcastTyping(this.state.activeConversation.id, {
+                userId: this.state.currentUser.id,
+                username: this.state.currentProfile?.username || 'user',
+                isTyping: true
+            });
+            clearTimeout(typingDebounce);
+            typingDebounce = setTimeout(() => {
+                if (this.state.activeConversation && this.state.currentUser) {
+                    realtimeService.broadcastTyping(this.state.activeConversation.id, {
+                        userId: this.state.currentUser.id,
+                        username: this.state.currentProfile?.username || 'user',
+                        isTyping: false
+                    });
+                }
+            }, 2500);
         });
 
         // Emoji Picker Simple Shortcut Trigger
@@ -400,6 +448,17 @@ export const AppView = {
         // Disappearing Timer Configuration Modal
         root.querySelector('#row-disappearing-timer')?.addEventListener('click', () => {
             this.showDisappearingTimerModal(root);
+        });
+
+        // Conversation Mute Toggle Handler
+        root.querySelector('#row-conversation-mute')?.addEventListener('click', async () => {
+            if (!this.state.activeConversation) return;
+            const res = await chatService.toggleConversationMute(this.state.activeConversation.id);
+            if (res.success) {
+                this.state.activeConversation.isMuted = res.isMuted;
+                this.updateInfoPanel(root, this.state.activeConversation);
+                this.loadConversations(root);
+            }
         });
 
         // Search Input Filter
@@ -513,11 +572,16 @@ export const AppView = {
             return;
         }
 
+        let unreadTotal = 0;
+
         listContainer.innerHTML = '';
         this.state.conversations.forEach((conv) => {
+            if (conv.hasUnread) unreadTotal++;
+
             const item = document.createElement('div');
             item.className = 'chat-item';
             if (this.state.activeConversation?.id === conv.id) item.classList.add('active');
+            if (conv.hasUnread) item.classList.add('has-unread');
 
             const isTyping = this.state.typingMap.get(conv.id);
 
@@ -528,13 +592,17 @@ export const AppView = {
                 </div>
                 <div class="chat-item-content">
                     <div class="chat-item-top">
-                        <span class="chat-item-name">${conv.title}</span>
+                        <div style="display: flex; align-items: center; gap: 0.35rem; min-width: 0;">
+                            <span class="chat-item-name">${conv.title}</span>
+                            ${conv.isMuted ? `<span class="muted-badge-icon" title="Muted">🔕</span>` : ''}
+                        </div>
                         <span class="chat-item-time">${conv.lastMessageTime}</span>
                     </div>
                     <div class="chat-item-bottom">
-                        <span class="chat-item-lastmsg ${isTyping ? 'typing-text' : ''}">
+                        <span class="chat-item-lastmsg ${isTyping ? 'typing-text' : ''}" style="${conv.hasUnread ? 'font-weight: 600; color: var(--text-primary);' : ''}">
                             ${isTyping ? 'Typing...' : conv.lastMessage}
                         </span>
+                        ${conv.hasUnread ? `<span class="badge-danger" style="font-size: 0.65rem; border-radius: 9999px; padding: 0.1rem 0.4rem; font-weight: 700;">●</span>` : ''}
                     </div>
                 </div>
             `;
@@ -545,12 +613,33 @@ export const AppView = {
 
             listContainer.appendChild(item);
         });
+
+        // Update chats badge
+        const badgeChats = root.querySelector('#badge-chats');
+        if (badgeChats) {
+            if (unreadTotal > 0) {
+                badgeChats.textContent = String(unreadTotal);
+                badgeChats.style.display = 'inline-block';
+            } else {
+                badgeChats.style.display = 'none';
+            }
+        }
     },
 
     /**
      * Select active conversation and load messages
      */
     async selectConversation(root, conv) {
+        // Clean up previous conversation realtime subscription & timers
+        if (this.activeConvUnsubscribe) {
+            this.activeConvUnsubscribe();
+            this.activeConvUnsubscribe = null;
+        }
+        if (this.disappearingTimerInterval) {
+            clearInterval(this.disappearingTimerInterval);
+            this.disappearingTimerInterval = null;
+        }
+
         this.state.activeConversation = conv;
         root.classList.add('in-chat'); // Mobile fullscreen trigger
 
@@ -581,7 +670,7 @@ export const AppView = {
             banner.style.display = 'flex';
             const mins = Math.round(conv.disappearingTimer / 60);
             root.querySelector('#ephemeral-banner-text').textContent = 
-                `Message will disappear after being read (${mins > 0 ? mins + ' minutes' : conv.disappearingTimer + ' seconds'})`;
+                `Messages disappear after being read (${mins > 0 ? mins + ' minutes' : conv.disappearingTimer + ' seconds'})`;
         } else {
             banner.style.display = 'none';
         }
@@ -589,8 +678,80 @@ export const AppView = {
         // Update Right Info Panel
         this.updateInfoPanel(root, conv);
 
+        // Mark incoming messages as delivered & read
+        chatService.markMessagesDelivered(conv.id);
+        chatService.markMessagesAsRead(conv.id);
+        conv.hasUnread = false;
+
         // Load Messages
         await this.loadMessages(root, conv.id);
+
+        // Start disappearing messages dynamic evaporation interval
+        this.startDisappearingWatcher(root);
+
+        // Subscribe to real-time events for this active conversation (WSS exclusively)
+        this.activeConvUnsubscribe = realtimeService.subscribeToConversation(conv.id, {
+            onMessage: (newMsg) => {
+                if (this.state.activeConversation?.id !== conv.id) return;
+                const isOutgoing = newMsg.sender_id === this.state.currentUser?.id;
+                
+                this.appendMessageToFeed(root, {
+                    id: newMsg.id,
+                    conversationId: newMsg.conversation_id,
+                    senderId: newMsg.sender_id,
+                    isOutgoing,
+                    text: newMsg.ciphertext,
+                    sentAt: newMsg.sent_at || newMsg.created_at,
+                    deliveredAt: newMsg.delivered_at,
+                    readAt: newMsg.read_at,
+                    status: newMsg.read_at ? 'read' : (newMsg.delivered_at ? 'delivered' : 'sent'),
+                    timeFormatted: new Date(newMsg.sent_at || newMsg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+                    expiresAt: newMsg.expires_at,
+                    messageType: newMsg.message_type
+                });
+
+                if (!isOutgoing) {
+                    // Mark delivered & read in database
+                    chatService.markMessagesDelivered(conv.id);
+                    chatService.markMessagesAsRead(conv.id);
+
+                    // Broadcast instant read receipt to sender over Realtime
+                    realtimeService.broadcastReceipt(conv.id, {
+                        conversationId: conv.id,
+                        messageId: newMsg.id,
+                        readerId: this.state.currentUser?.id,
+                        status: 'read',
+                        readAt: new Date().toISOString()
+                    });
+                }
+
+                // Peer finished sending, remove typing indicator
+                this.showPeerTypingIndicator(root, '', false);
+
+                // Update sidebar preview
+                this.loadConversations(root);
+            },
+            onUpdate: (payload) => {
+                if (this.state.activeConversation?.id !== conv.id) return;
+                this.handleMessageUpdate(root, payload);
+            },
+            onDelete: (oldMsg) => {
+                if (this.state.activeConversation?.id !== conv.id) return;
+                if (oldMsg?.id) {
+                    this.removeMessageFromFeed(root, oldMsg.id);
+                }
+            },
+            onTyping: (payload) => {
+                if (this.state.activeConversation?.id !== conv.id) return;
+                if (payload && payload.userId !== this.state.currentUser?.id) {
+                    this.showPeerTypingIndicator(root, payload.username || conv.title, !!payload.isTyping);
+                }
+            },
+            onPresence: (state) => {
+                if (this.state.activeConversation?.id !== conv.id) return;
+                this.handlePeerPresence(root, conv, state);
+            }
+        });
     },
 
     /**
@@ -622,14 +783,19 @@ export const AppView = {
         msgs.forEach(m => {
             const row = document.createElement('div');
             row.className = `message-row ${m.isOutgoing ? 'outgoing' : 'incoming'}`;
+            row.setAttribute('data-msg-id', m.id);
+            if (m.expiresAt) {
+                row.setAttribute('data-expires-at', m.expiresAt);
+            }
 
             row.innerHTML = `
                 <div class="message-bubble">
                     ${this.escapeHtml(m.text)}
                 </div>
                 <div class="message-meta">
+                    ${m.expiresAt ? `<span class="expires-indicator" title="Disappearing message">⏳</span>` : ''}
                     <span>${m.timeFormatted}</span>
-                    ${m.isOutgoing ? `<span class="read-ticks">✓✓</span>` : ''}
+                    ${m.isOutgoing ? this.getReadTicksHtml(m.status) : ''}
                 </div>
             `;
 
@@ -638,6 +804,226 @@ export const AppView = {
 
         // Scroll to bottom
         feed.scrollTop = feed.scrollHeight;
+    },
+
+    /**
+     * Compute read receipt ticks HTML
+     */
+    getReadTicksHtml(status) {
+        if (status === 'read') {
+            return `<span class="read-ticks ticks-read" title="Read">✓✓</span>`;
+        }
+        if (status === 'delivered') {
+            return `<span class="read-ticks ticks-delivered" title="Delivered">✓✓</span>`;
+        }
+        return `<span class="read-ticks ticks-sent" title="Sent">✓</span>`;
+    },
+
+    /**
+     * Append message to active feed
+     */
+    appendMessageToFeed(root, m) {
+        const feed = root.querySelector('#messages-feed');
+        if (!feed) return;
+
+        // Remove placeholder empty state if present
+        const emptyState = feed.querySelector('.empty-state-box');
+        if (emptyState) emptyState.remove();
+
+        // Avoid duplicate message DOM elements
+        if (feed.querySelector(`[data-msg-id="${m.id}"]`)) return;
+
+        const row = document.createElement('div');
+        row.className = `message-row ${m.isOutgoing ? 'outgoing' : 'incoming'}`;
+        row.setAttribute('data-msg-id', m.id);
+        if (m.expiresAt) {
+            row.setAttribute('data-expires-at', m.expiresAt);
+        }
+
+        row.innerHTML = `
+            <div class="message-bubble">
+                ${this.escapeHtml(m.text)}
+            </div>
+            <div class="message-meta">
+                ${m.expiresAt ? `<span class="expires-indicator" title="Disappearing message">⏳</span>` : ''}
+                <span>${m.timeFormatted}</span>
+                ${m.isOutgoing ? this.getReadTicksHtml(m.status) : ''}
+            </div>
+        `;
+
+        // If typing indicator is active at bottom, insert before it
+        const typingEl = feed.querySelector('#feed-typing-indicator');
+        if (typingEl) {
+            feed.insertBefore(row, typingEl);
+        } else {
+            feed.appendChild(row);
+        }
+
+        feed.scrollTop = feed.scrollHeight;
+    },
+
+    /**
+     * Handle realtime message status updates (Delivered / Read)
+     */
+    handleMessageUpdate(root, payload) {
+        const feed = root.querySelector('#messages-feed');
+        if (!feed) return;
+
+        const targetId = payload.id || payload.messageId;
+        if (targetId) {
+            const row = feed.querySelector(`[data-msg-id="${targetId}"]`);
+            if (row) {
+                const ticksEl = row.querySelector('.read-ticks');
+                if (ticksEl) {
+                    if (payload.read_at || payload.status === 'read') {
+                        ticksEl.className = 'read-ticks ticks-read';
+                        ticksEl.title = 'Read';
+                        ticksEl.textContent = '✓✓';
+                    } else if (payload.delivered_at || payload.status === 'delivered') {
+                        ticksEl.className = 'read-ticks ticks-delivered';
+                        ticksEl.title = 'Delivered';
+                        ticksEl.textContent = '✓✓';
+                    }
+                }
+            }
+        }
+
+        // If reader confirmed reading the conversation, upgrade outgoing ticks to read
+        if (payload.readerId && payload.status === 'read') {
+            feed.querySelectorAll('.message-row.outgoing .read-ticks').forEach(ticks => {
+                ticks.className = 'read-ticks ticks-read';
+                ticks.title = 'Read';
+                ticks.textContent = '✓✓';
+            });
+        }
+    },
+
+    /**
+     * Remove expired or deleted message from feed
+     */
+    removeMessageFromFeed(root, messageId) {
+        const feed = root.querySelector('#messages-feed');
+        if (!feed) return;
+
+        const row = feed.querySelector(`[data-msg-id="${messageId}"]`);
+        if (row) {
+            row.style.transition = 'opacity 0.3s ease, transform 0.3s ease';
+            row.style.opacity = '0';
+            row.style.transform = 'scale(0.95)';
+            setTimeout(() => row.remove(), 300);
+        }
+    },
+
+    /**
+     * Show or hide peer typing indicator in header and feed
+     */
+    showPeerTypingIndicator(root, username, isTyping) {
+        const feed = root.querySelector('#messages-feed');
+        const headerStatus = root.querySelector('#chat-header-status');
+        const conv = this.state.activeConversation;
+
+        if (headerStatus && conv) {
+            if (isTyping) {
+                headerStatus.innerHTML = `<span style="color: var(--accent); font-weight: 500;">typing...</span>`;
+            } else {
+                if (conv.isOnline) {
+                    headerStatus.innerHTML = `<span style="color: var(--color-success); font-weight: 500;">● Online</span>`;
+                } else {
+                    headerStatus.textContent = conv.peerUsername ? `@${conv.peerUsername}` : 'Private Chat';
+                }
+            }
+        }
+
+        if (feed) {
+            let typingEl = feed.querySelector('#feed-typing-indicator');
+            if (isTyping) {
+                if (!typingEl) {
+                    typingEl = document.createElement('div');
+                    typingEl.id = 'feed-typing-indicator';
+                    typingEl.className = 'typing-bubble-row';
+                    typingEl.innerHTML = `
+                        <div class="typing-dots-pill">
+                            <span class="typing-dot"></span>
+                            <span class="typing-dot"></span>
+                            <span class="typing-dot"></span>
+                        </div>
+                        <span style="font-size: 0.75rem; color: var(--text-muted);">${this.escapeHtml(username || 'Peer')} is typing</span>
+                    `;
+                    feed.appendChild(typingEl);
+                    feed.scrollTop = feed.scrollHeight;
+                }
+            } else if (typingEl) {
+                typingEl.remove();
+            }
+        }
+    },
+
+    /**
+     * Handle peer presence changes (Online / Offline)
+     */
+    handlePeerPresence(root, conv, presenceState) {
+        const user = this.state.currentUser;
+        if (!presenceState || !conv) return;
+
+        let isPeerOnline = false;
+        Object.values(presenceState).forEach(presences => {
+            if (Array.isArray(presences)) {
+                presences.forEach(p => {
+                    if (p.user_id && p.user_id !== user?.id) {
+                        isPeerOnline = true;
+                    }
+                });
+            }
+        });
+
+        conv.isOnline = isPeerOnline;
+
+        const statusEl = root.querySelector('#chat-header-status');
+        if (statusEl) {
+            if (isPeerOnline) {
+                statusEl.innerHTML = `<span style="color: var(--color-success); font-weight: 500;">● Online</span>`;
+            } else {
+                statusEl.textContent = conv.peerUsername ? `@${conv.peerUsername}` : 'Private Chat';
+            }
+        }
+
+        const sidebarItem = root.querySelector('.chat-item.active .online-indicator');
+        if (sidebarItem) {
+            sidebarItem.style.display = isPeerOnline ? 'block' : 'none';
+        }
+    },
+
+    /**
+     * Disappearing message live countdown & client evaporation
+     */
+    startDisappearingWatcher(root) {
+        if (this.disappearingTimerInterval) {
+            clearInterval(this.disappearingTimerInterval);
+        }
+
+        this.disappearingTimerInterval = setInterval(() => {
+            const feed = root.querySelector('#messages-feed');
+            if (!feed) return;
+
+            const now = Date.now();
+            const expiringRows = feed.querySelectorAll('.message-row[data-expires-at]');
+            let hasExpired = false;
+
+            expiringRows.forEach(row => {
+                const expiresAt = row.getAttribute('data-expires-at');
+                if (expiresAt && new Date(expiresAt).getTime() <= now) {
+                    hasExpired = true;
+                    row.style.transition = 'opacity 0.4s ease, transform 0.4s ease';
+                    row.style.opacity = '0';
+                    row.style.transform = 'scale(0.9)';
+                    setTimeout(() => row.remove(), 400);
+                }
+            });
+
+            if (hasExpired) {
+                chatService.purgeExpiredMessages();
+            }
+        }, 1000);
     },
 
     /**
@@ -662,6 +1048,14 @@ export const AppView = {
         } else {
             avatarBox.innerHTML = `<span>${conv.title.charAt(0).toUpperCase()}</span>`;
         }
+
+        // Mute state
+        const muteLabel = root.querySelector('#mute-label-text');
+        const muteSub = root.querySelector('#mute-sub-text');
+        const muteIcon = root.querySelector('#mute-status-icon');
+        if (muteLabel) muteLabel.textContent = conv.isMuted ? 'Unmute Notifications' : 'Mute Notifications';
+        if (muteSub) muteSub.textContent = conv.isMuted ? 'Notifications are currently muted' : 'Silence alerts for this chat';
+        if (muteIcon) muteIcon.textContent = conv.isMuted ? '🔕' : '🔔';
 
         // Fetch peer profile details respecting privacy settings
         if (conv.peerUsername) {
@@ -2273,6 +2667,14 @@ export const AppView = {
     unmount() {
         if (this._hashHandler) {
             window.removeEventListener('hashchange', this._hashHandler);
+        }
+        if (this.activeConvUnsubscribe) {
+            this.activeConvUnsubscribe();
+            this.activeConvUnsubscribe = null;
+        }
+        if (this.disappearingTimerInterval) {
+            clearInterval(this.disappearingTimerInterval);
+            this.disappearingTimerInterval = null;
         }
         if (this.unsubscribeRealtime) {
             this.unsubscribeRealtime();

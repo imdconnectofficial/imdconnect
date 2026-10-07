@@ -92,6 +92,10 @@ class ChatService {
 
                 const lastMsg = lastMsgs && lastMsgs[0] ? lastMsgs[0] : null;
 
+                const isMuted = membership ? !!membership.is_muted : false;
+                const hasUnread = lastMsg && lastMsg.sender_id !== user.id && 
+                    (!membership?.last_read_at || new Date(lastMsg.sent_at || lastMsg.created_at) > new Date(membership.last_read_at));
+
                 return {
                     id: conv.id,
                     type: conv.type,
@@ -99,10 +103,12 @@ class ChatService {
                     peerUsername,
                     avatarUrl,
                     isOnline,
+                    isMuted,
+                    hasUnread,
                     disappearingTimer: conv.disappearing_timer,
                     membership,
                     lastMessage: lastMsg ? lastMsg.ciphertext : 'No messages yet',
-                    lastMessageTime: lastMsg ? new Date(lastMsg.sent_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '',
+                    lastMessageTime: lastMsg ? new Date(lastMsg.sent_at || lastMsg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '',
                     updatedAt: conv.updated_at
                 };
             }));
@@ -116,6 +122,7 @@ class ChatService {
 
     /**
      * Fetch message thread for a conversation
+     * Filters expired disappearing messages and maps sent, delivered, and read receipt statuses
      * @param {string} conversationId 
      * @returns {Promise<Array>}
      */
@@ -135,17 +142,39 @@ class ChatService {
                 return [];
             }
 
-            return (data || []).map(m => ({
-                id: m.id,
-                conversationId: m.conversation_id,
-                senderId: m.sender_id,
-                isOutgoing: m.sender_id === user.id,
-                text: m.ciphertext,
-                sentAt: m.sent_at,
-                timeFormatted: new Date(m.sent_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-                expiresAt: m.expires_at,
-                messageType: m.message_type
-            }));
+            const now = Date.now();
+            return (data || [])
+                .filter(m => {
+                    if (m.is_deleted_for_all) return false;
+                    if (m.expires_at && new Date(m.expires_at).getTime() <= now) return false;
+                    return true;
+                })
+                .map(m => {
+                    const isOutgoing = m.sender_id === user.id;
+                    const sentAt = m.sent_at || m.created_at;
+                    const deliveredAt = m.delivered_at;
+                    const readAt = m.read_at;
+
+                    // Compute receipt state: 'sent' (1 tick) | 'delivered' (2 gray ticks) | 'read' (2 blue ticks)
+                    let status = 'sent';
+                    if (readAt) status = 'read';
+                    else if (deliveredAt) status = 'delivered';
+
+                    return {
+                        id: m.id,
+                        conversationId: m.conversation_id,
+                        senderId: m.sender_id,
+                        isOutgoing,
+                        text: m.ciphertext,
+                        sentAt,
+                        deliveredAt,
+                        readAt,
+                        status,
+                        timeFormatted: new Date(sentAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+                        expiresAt: m.expires_at,
+                        messageType: m.message_type
+                    };
+                });
         } catch (err) {
             console.error('[ChatService] getMessages exception:', err);
             return [];
@@ -154,6 +183,7 @@ class ChatService {
 
     /**
      * Send a strictly text-only message (Rule 1 & Rule 2)
+     * Rejects any attachments, voice notes, stickers, images, or media files
      * @param {Object} params
      * @param {string} params.conversationId
      * @param {string} params.text
@@ -167,6 +197,7 @@ class ChatService {
         if (!trimmedText) return { success: false, error: 'Cannot send empty message.' };
 
         try {
+            const nowIso = new Date().toISOString();
             const { data, error } = await supabase
                 .from('messages')
                 .insert({
@@ -174,7 +205,8 @@ class ChatService {
                     sender_id: user.id,
                     ciphertext: trimmedText,
                     nonce_iv: 'v1_direct',
-                    message_type: 'text'
+                    message_type: 'text',
+                    sent_at: nowIso
                 })
                 .select()
                 .single();
@@ -187,13 +219,147 @@ class ChatService {
             // Update conversation updated_at timestamp
             await supabase
                 .from('conversations')
-                .update({ updated_at: new Date().toISOString() })
+                .update({ updated_at: nowIso })
                 .eq('id', conversationId);
 
             return { success: true, message: data };
         } catch (err) {
             console.error('[ChatService] Send message exception:', err);
             return { success: false, error: 'Failed to send text message.' };
+        }
+    }
+
+    /**
+     * Mark conversation messages as delivered
+     * @param {string} conversationId 
+     * @returns {Promise<{ success: boolean, count?: number }>}
+     */
+    async markMessagesDelivered(conversationId) {
+        const user = await authService.getUser();
+        if (!user || !conversationId) return { success: false };
+
+        try {
+            const { data, error } = await supabase.rpc('mark_conversation_delivered', {
+                p_conversation_id: conversationId
+            });
+
+            if (!error && data?.success) {
+                return { success: true, count: data.marked_delivered_count };
+            }
+
+            // Fallback direct table update
+            await supabase
+                .from('messages')
+                .update({ delivered_at: new Date().toISOString() })
+                .eq('conversation_id', conversationId)
+                .neq('sender_id', user.id)
+                .is('delivered_at', null);
+
+            return { success: true };
+        } catch (err) {
+            return { success: false };
+        }
+    }
+
+    /**
+     * Mark conversation messages as read (Read Receipts)
+     * @param {string} conversationId 
+     * @returns {Promise<{ success: boolean, count?: number }>}
+     */
+    async markMessagesAsRead(conversationId) {
+        const user = await authService.getUser();
+        if (!user || !conversationId) return { success: false };
+
+        try {
+            const { data, error } = await supabase.rpc('mark_conversation_read', {
+                p_conversation_id: conversationId
+            });
+
+            if (!error && data?.success) {
+                return { success: true, count: data.marked_read_count };
+            }
+
+            // Fallback direct table updates
+            const now = new Date().toISOString();
+            await supabase
+                .from('messages')
+                .update({ read_at: now, delivered_at: now })
+                .eq('conversation_id', conversationId)
+                .neq('sender_id', user.id)
+                .is('read_at', null);
+
+            await supabase
+                .from('conversation_members')
+                .update({ last_read_at: now })
+                .eq('conversation_id', conversationId)
+                .eq('user_id', user.id);
+
+            return { success: true };
+        } catch (err) {
+            return { success: false };
+        }
+    }
+
+    /**
+     * Toggle conversation mute notifications
+     * @param {string} conversationId 
+     * @returns {Promise<{ success: boolean, isMuted?: boolean }>}
+     */
+    async toggleConversationMute(conversationId) {
+        const user = await authService.getUser();
+        if (!user || !conversationId) return { success: false };
+
+        try {
+            const { data, error } = await supabase.rpc('toggle_conversation_mute', {
+                p_conversation_id: conversationId
+            });
+
+            if (!error && data?.success) {
+                return { success: true, isMuted: data.is_muted };
+            }
+
+            // Fallback direct update
+            const { data: member } = await supabase
+                .from('conversation_members')
+                .select('is_muted')
+                .eq('conversation_id', conversationId)
+                .eq('user_id', user.id)
+                .single();
+
+            const nextMuted = !(member?.is_muted);
+            await supabase
+                .from('conversation_members')
+                .update({ is_muted: nextMuted })
+                .eq('conversation_id', conversationId)
+                .eq('user_id', user.id);
+
+            return { success: true, isMuted: nextMuted };
+        } catch (err) {
+            return { success: false };
+        }
+    }
+
+    /**
+     * Purge expired disappearing messages
+     * @returns {Promise<{ success: boolean, purgedCount?: number }>}
+     */
+    async purgeExpiredMessages() {
+        try {
+            const { data, error } = await supabase.rpc('purge_expired_messages');
+            if (!error && data?.success) {
+                return { success: true, purgedCount: data.purged_count };
+            }
+
+            // Fallback direct cleanup
+            await supabase
+                .from('messages')
+                .delete()
+                .not('expires_at', 'is', null)
+                .lte('expires_at', new Date().toISOString());
+
+            return { success: true };
+        } catch (err) {
+            return { success: false };
         }
     }
 
