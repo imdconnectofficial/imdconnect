@@ -668,9 +668,9 @@ export const AppView = {
         const banner = root.querySelector('#chat-ephemeral-banner');
         if (conv.disappearingTimer > 0) {
             banner.style.display = 'flex';
-            const mins = Math.round(conv.disappearingTimer / 60);
+            const label = this.formatDisappearingDuration(conv.disappearingTimer);
             root.querySelector('#ephemeral-banner-text').textContent = 
-                `Messages disappear after being read (${mins > 0 ? mins + ' minutes' : conv.disappearingTimer + ' seconds'})`;
+                `Messages disappear ${label} after being read`;
         } else {
             banner.style.display = 'none';
         }
@@ -1035,11 +1035,8 @@ export const AppView = {
         root.querySelector('#info-stat-handle').textContent = conv.peerUsername ? `@${conv.peerUsername}` : 'Group';
 
         const timerLabel = root.querySelector('#current-disappearing-label');
-        if (conv.disappearingTimer > 0) {
-            const mins = Math.round(conv.disappearingTimer / 60);
-            timerLabel.textContent = mins > 0 ? `${mins} minutes` : `${conv.disappearingTimer}s`;
-        } else {
-            timerLabel.textContent = 'Off';
+        if (timerLabel) {
+            timerLabel.textContent = this.formatDisappearingDuration(conv.disappearingTimer);
         }
 
         const avatarBox = root.querySelector('#info-avatar-box');
@@ -2557,6 +2554,23 @@ export const AppView = {
     },
 
     /**
+     * Format disappearing message duration
+     */
+    formatDisappearingDuration(seconds) {
+        const sec = parseInt(seconds, 10);
+        if (!sec || sec <= 0) return 'Off';
+        if (sec === 30) return '30 seconds';
+        if (sec === 60) return '1 minute';
+        if (sec === 180) return '3 minutes';
+        if (sec === 600) return '10 minutes';
+        if (sec === 3600) return '1 hour';
+        if (sec === 86400) return '24 hours';
+        if (sec < 60) return `${sec} seconds`;
+        if (sec < 3600) return `${Math.round(sec / 60)} minutes`;
+        return `${Math.round(sec / 3600)} hours`;
+    },
+
+    /**
      * Disappearing Messages Timer Picker Modal
      */
     showDisappearingTimerModal(root) {
@@ -2566,14 +2580,15 @@ export const AppView = {
         modal.style.display = 'flex';
         modal.className = 'modal-overlay';
 
-        const currentTimer = this.state.activeConversation.disappearingTimer || 0;
+        const currentTimer = this.state.activeConversation.disappearingTimer ?? 180;
         const options = [
             { label: 'Off', seconds: 0 },
             { label: '30 seconds', seconds: 30 },
-            { label: '5 minutes', seconds: 300 },
+            { label: '1 minute', seconds: 60 },
+            { label: '3 minutes (Default)', seconds: 180 },
+            { label: '10 minutes', seconds: 600 },
             { label: '1 hour', seconds: 3600 },
-            { label: '24 hours', seconds: 86400 },
-            { label: '7 days', seconds: 604800 }
+            { label: '24 hours', seconds: 86400 }
         ];
 
         modal.innerHTML = `

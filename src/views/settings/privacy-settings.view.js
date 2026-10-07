@@ -90,12 +90,13 @@ export const PrivacySettingsView = {
                         <div class="form-group">
                             <label class="form-label">Default Disappearing Messages Timer</label>
                             <select id="select-disappearing-timer" class="form-input">
-                                <option value="0" ${privacy.default_disappearing_timer === 0 ? 'selected' : ''}>Off (Never Expire)</option>
-                                <option value="30" ${privacy.default_disappearing_timer === 30 ? 'selected' : ''}>30 Seconds</option>
-                                <option value="300" ${privacy.default_disappearing_timer === 300 ? 'selected' : ''}>5 Minutes</option>
-                                <option value="3600" ${privacy.default_disappearing_timer === 3600 ? 'selected' : ''}>1 Hour</option>
-                                <option value="86400" ${privacy.default_disappearing_timer === 86400 ? 'selected' : ''}>24 Hours</option>
-                                <option value="604800" ${privacy.default_disappearing_timer === 604800 ? 'selected' : ''}>7 Days</option>
+                                <option value="0" ${(privacy.default_disappearing_timer ?? 180) === 0 ? 'selected' : ''}>Off (Never Expire)</option>
+                                <option value="30" ${(privacy.default_disappearing_timer ?? 180) === 30 ? 'selected' : ''}>30 Seconds</option>
+                                <option value="60" ${(privacy.default_disappearing_timer ?? 180) === 60 ? 'selected' : ''}>1 Minute</option>
+                                <option value="180" ${(privacy.default_disappearing_timer ?? 180) === 180 ? 'selected' : ''}>3 Minutes (Default)</option>
+                                <option value="600" ${(privacy.default_disappearing_timer ?? 180) === 600 ? 'selected' : ''}>10 Minutes</option>
+                                <option value="3600" ${(privacy.default_disappearing_timer ?? 180) === 3600 ? 'selected' : ''}>1 Hour</option>
+                                <option value="86400" ${(privacy.default_disappearing_timer ?? 180) === 86400 ? 'selected' : ''}>24 Hours</option>
                             </select>
                             <span class="form-hint">Applied automatically when establishing new direct text chats.</span>
                         </div>

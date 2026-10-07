@@ -131,10 +131,12 @@ class ChatService {
         if (!user || !conversationId) return [];
 
         try {
+            const nowIso = new Date().toISOString();
             const { data, error } = await supabase
                 .from('messages')
                 .select('*')
                 .eq('conversation_id', conversationId)
+                .or(`expires_at.is.null,expires_at.gt.${nowIso}`)
                 .order('created_at', { ascending: true });
 
             if (error) {
@@ -345,9 +347,16 @@ class ChatService {
      */
     async purgeExpiredMessages() {
         try {
-            const { data, error } = await supabase.rpc('purge_expired_messages');
+            // First call cleanup_expired_messages (primary function)
+            const { data, error } = await supabase.rpc('cleanup_expired_messages');
             if (!error && data?.success) {
                 return { success: true, purgedCount: data.purged_count };
+            }
+
+            // Fallback to purge_expired_messages alias
+            const { data: d2, error: e2 } = await supabase.rpc('purge_expired_messages');
+            if (!e2 && d2?.success) {
+                return { success: true, purgedCount: d2.purged_count };
             }
 
             // Fallback direct cleanup
@@ -456,11 +465,12 @@ class ChatService {
                 }
             }
 
-            // Create new conversation
+            // Create new conversation with default 3-minute (180s) disappearing timer
             const { data: conv, error: convErr } = await supabase
                 .from('conversations')
                 .insert({
                     type: 'direct',
+                    disappearing_timer: 180,
                     created_by: user.id
                 })
                 .select()
@@ -504,11 +514,12 @@ class ChatService {
         if (!trimmedName) return { success: false, error: 'Group name is required.' };
 
         try {
-            // 1. Create conversation container
+            // 1. Create conversation container with default 3-minute (180s) disappearing timer
             const { data: conv, error: convErr } = await supabase
                 .from('conversations')
                 .insert({
                     type: 'group',
+                    disappearing_timer: 180,
                     created_by: user.id
                 })
                 .select()
@@ -615,27 +626,39 @@ class ChatService {
 
     /**
      * Update disappearing message timer
+     * Allowed durations: 0 (Off), 30s, 60s (1m), 180s (3m, Default), 600s (10m), 3600s (1h), 86400s (24h)
      * @param {string} conversationId 
      * @param {number} timerSeconds 
-     * @returns {Promise<{ success: boolean }>}
+     * @returns {Promise<{ success: boolean, error?: string }>}
      */
     async updateDisappearingTimer(conversationId, timerSeconds) {
         const user = await authService.getUser();
-        if (!user) return { success: false };
+        if (!user || !conversationId) return { success: false, error: 'Authentication required.' };
+
+        const allowedDurations = [0, 30, 60, 180, 600, 3600, 86400];
+        const sec = parseInt(timerSeconds, 10);
+        if (!allowedDurations.includes(sec)) {
+            return { success: false, error: 'Invalid disappearing timer duration.' };
+        }
 
         try {
             const { error } = await supabase
                 .from('conversations')
                 .update({
-                    disappearing_timer: timerSeconds,
+                    disappearing_timer: sec,
                     disappearing_timer_set_by: user.id,
                     disappearing_timer_updated_at: new Date().toISOString()
                 })
                 .eq('id', conversationId);
 
-            return { success: !error };
+            if (error) {
+                console.error('[ChatService] updateDisappearingTimer error:', error);
+                return { success: false, error: error.message };
+            }
+
+            return { success: true };
         } catch (err) {
-            return { success: false };
+            return { success: false, error: err.message };
         }
     }
 }
