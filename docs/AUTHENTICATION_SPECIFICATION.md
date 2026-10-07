@@ -80,13 +80,24 @@ sequenceDiagram
 
 ## 3. Core Feature Specifications
 
-### 3.1 Registration Requirements
-- **Display Name (`name`):** 1 to 50 characters, shown to peers.
-- **Unique Handle (`username`):** 3 to 30 characters matching regex `^[a-z0-9_]{3,30}$`. Real-time debounced availability check prevents collisions.
-- **Date of Birth (`birthDate`):** Validated client-side and server-side to guarantee age $\ge 13$. Protected in `public.public_profiles` view so only the account owner or staff can see it.
-- **Private Email (`email`):** Validated format. Managed by Supabase Auth; never exposed in chat or directory lookups.
-- **Password & Confirmation:** Minimum 8 characters. Validated for matching equality.
-- **Mobile Number:** Completely omitted.
+### 3.1 Complete Registration Flow Specification
+- **Full Name (`name`):** 2 to 100 characters. Validated client-side and sanitized in database bootstrap trigger.
+- **Unique Handle (`username`):** 3 to 30 characters matching regex `^[a-z0-9_]{3,30}$`.
+  - **Client-Side:** Real-time debounced RPC pre-flight availability check (`check_username_availability`) with live visual cues (checking, available, taken, invalid format).
+  - **Server-Side:** PostgreSQL `chk_profiles_username_format` constraint and `UNIQUE` constraint (`profiles_username_key`) on `public.profiles`. The `handle_new_user()` trigger performs duplicate checking and aborts registration with clear exception messaging.
+- **Date of Birth (`birthDate`):** 
+  - **Client-Side:** Dynamic age calculation (`authService.calculateAge`) with real-time feedback pill showing derived age and compliance. Enforces minimum age of 13 years (`CONFIG.MIN_AGE_YEARS`). Date picker constrained by `max="YYYY-MM-DD"` (today) to prevent future dates.
+  - **Server-Side:** PostgreSQL `chk_profiles_min_age` constraint (`birth_date IS NOT NULL AND birth_date <= (CURRENT_DATE - INTERVAL '13 years')`) and trigger validation.
+  - **Non-Authoritative Age Rule:** Age is strictly derived on-the-fly (`get_user_age()` RPC or client calculation) from `birth_date`. No static, desynchronizable age column is stored.
+  - **Privacy Boundary:** `birth_date` is strictly hidden from peer users in `public_profiles` view (`CASE WHEN p.id = auth.uid() OR is_app_admin() THEN p.birth_date ELSE NULL END`).
+- **Private Email (`email`):** Strictly validated format. Managed securely by Supabase Auth; never exposed in public directory lookups or chat interactions.
+- **Password & Confirmation:** Minimum 8 characters. Live password criteria checklist and real-time confirmation equality indicator. Hashing and credentials management strictly delegated to Supabase Auth (bcrypt); zero passwords in custom tables.
+- **Anti-Hammering Protection:**
+  - Client-side rate-limiting cooldown (`CONFIG.REGISTRATION_COOLDOWN_SECONDS = 5`) rejects rapid submission bursts.
+  - Submit button disables immediately with spinner on submission.
+  - HTTP 429 and rate-limiting responses trigger automated countdown lockouts on the submission button.
+- **Safe Profile & Settings Creation:**
+  - `handle_new_user()` trigger safely boots `profiles` via `ON CONFLICT (id) DO UPDATE` and defaults for `user_settings`, `privacy_settings`, and `notification_settings` via `ON CONFLICT (user_id) DO NOTHING`.
 
 ### 3.2 Login Capabilities
 - **Flexible Identifier:** Accepts either `@username` or personal `email`.
@@ -112,4 +123,6 @@ sequenceDiagram
 | **No Email Harvesting** | `authenticate_with_username` requires matching password hash before returning the internal email address. Unknown users trigger dummy crypt calls to eliminate timing side-channels. |
 | **Anti-Enumeration Responses** | Both login failures and password reset requests return identical generic messages regardless of account existence. |
 | **Route Protection** | `Router` enforces `requiresAuth` and `requiresGuest` guards before mounting views. |
-| **Rate-Limit Friendly UX** | Cooldown timers on resend email and reset password buttons prevent accidental API spam. |
+| **Age & DOB Privacy** | `birth_date` masked from peers via `public_profiles` view; derived age calculated dynamically with zero authoritative static age storage. |
+| **Database-Side Constraints** | `chk_profiles_min_age` and `chk_profiles_username_format` ensure data integrity even if client validation is bypassed. |
+| **Anti-Hammering UX** | Cooldown timers on registration, resend email, and reset password buttons prevent accidental API spam. |

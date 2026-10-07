@@ -24,4 +24,5 @@ export const CONFIG = {
     // Auth Rate Limiting & Cooldowns
     RESEND_COOLDOWN_SECONDS: 60,
     PASSWORD_RESET_COOLDOWN_SECONDS: 60,
+    REGISTRATION_COOLDOWN_SECONDS: 5,
 };

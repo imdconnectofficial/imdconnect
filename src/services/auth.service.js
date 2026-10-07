@@ -8,6 +8,60 @@ class AuthService {
     constructor() {
         this._lastPasswordResetRequest = 0;
         this._lastResendVerification = 0;
+        this._lastSignUpAttempt = 0;
+    }
+
+    /**
+     * Dynamically calculate age from birth date string and check compliance.
+     * Note: Age is NOT stored as authoritative data in DB — derived dynamically from birth_date.
+     * @param {string} birthDateString - YYYY-MM-DD
+     * @returns {{ age: number|null, isCompliant: boolean, error?: string }}
+     */
+    calculateAge(birthDateString) {
+        if (!birthDateString || typeof birthDateString !== 'string') {
+            return { age: null, isCompliant: false, error: 'Date of birth is required.' };
+        }
+
+        const parts = birthDateString.split('-');
+        if (parts.length !== 3) {
+            return { age: null, isCompliant: false, error: 'Invalid date format. Use YYYY-MM-DD.' };
+        }
+
+        const year = parseInt(parts[0], 10);
+        const month = parseInt(parts[1], 10) - 1;
+        const day = parseInt(parts[2], 10);
+        const dob = new Date(year, month, day);
+
+        if (isNaN(dob.getTime()) || dob.getFullYear() !== year || dob.getMonth() !== month || dob.getDate() !== day) {
+            return { age: null, isCompliant: false, error: 'Invalid calendar date.' };
+        }
+
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+
+        if (dob > today) {
+            return { age: null, isCompliant: false, error: 'Date of birth cannot be in the future.' };
+        }
+
+        let age = today.getFullYear() - dob.getFullYear();
+        const monthDiff = today.getMonth() - dob.getMonth();
+        if (monthDiff < 0 || (monthDiff === 0 && today.getDate() < dob.getDate())) {
+            age--;
+        }
+
+        if (age < 0) {
+            return { age: 0, isCompliant: false, error: 'Date of birth cannot be in the future.' };
+        }
+
+        if (age < CONFIG.MIN_AGE_YEARS) {
+            return {
+                age,
+                isCompliant: false,
+                error: `You must be at least ${CONFIG.MIN_AGE_YEARS} years old to join ImdConnect.`
+            };
+        }
+
+        return { age, isCompliant: true };
     }
 
     /**
@@ -16,17 +70,7 @@ class AuthService {
      * @returns {boolean}
      */
     isAgeCompliant(birthDateString) {
-        if (!birthDateString) return false;
-        const dob = new Date(birthDateString);
-        if (isNaN(dob.getTime())) return false;
-
-        const today = new Date();
-        let age = today.getFullYear() - dob.getFullYear();
-        const monthDiff = today.getMonth() - dob.getMonth();
-        if (monthDiff < 0 || (monthDiff === 0 && today.getDate() < dob.getDate())) {
-            age--;
-        }
-        return age >= CONFIG.MIN_AGE_YEARS;
+        return this.calculateAge(birthDateString).isCompliant;
     }
 
     /**
@@ -35,7 +79,7 @@ class AuthService {
      * @returns {Promise<{ available: boolean, error?: string }>}
      */
     async checkUsernameAvailability(rawUsername) {
-        const username = rawUsername.trim().toLowerCase().replace(/^@/, '');
+        const username = (rawUsername || '').trim().toLowerCase().replace(/^@/, '');
         
         if (!CONFIG.USERNAME_REGEX.test(username)) {
             return {
@@ -70,16 +114,31 @@ class AuthService {
      * @param {string} params.email - Private email
      * @param {string} params.password
      * @param {string} params.passwordConfirm
-     * @returns {Promise<{ success: boolean, user?: Object, session?: Object, needsVerification?: boolean, error?: string }>}
+     * @returns {Promise<{ success: boolean, user?: Object, session?: Object, needsVerification?: boolean, rateLimited?: boolean, retryAfter?: number, error?: string }>}
      */
     async signUp({ name, username, birthDate, email, password, passwordConfirm }) {
-        // 1. Client-Side Field Validation
+        // 1. Client-Side Anti-Hammering Rate Limiting
+        const now = Date.now();
+        const cooldownMs = (CONFIG.REGISTRATION_COOLDOWN_SECONDS || 5) * 1000;
+        const elapsed = now - this._lastSignUpAttempt;
+        if (elapsed < cooldownMs) {
+            const remaining = Math.ceil((cooldownMs - elapsed) / 1000);
+            return {
+                success: false,
+                rateLimited: true,
+                retryAfter: remaining,
+                error: `Please wait ${remaining} second${remaining > 1 ? 's' : ''} before submitting again.`
+            };
+        }
+        this._lastSignUpAttempt = now;
+
+        // 2. Client-Side Field Validation
         const trimmedName = (name || '').trim();
         const cleanedUsername = (username || '').trim().toLowerCase().replace(/^@/, '');
         const trimmedEmail = (email || '').trim().toLowerCase();
 
-        if (!trimmedName) {
-            return { success: false, error: 'Name is required.' };
+        if (!trimmedName || trimmedName.length < 2) {
+            return { success: false, error: 'Full name must be at least 2 characters.' };
         }
 
         if (!CONFIG.USERNAME_REGEX.test(cleanedUsername)) {
@@ -89,10 +148,11 @@ class AuthService {
             };
         }
 
-        if (!this.isAgeCompliant(birthDate)) {
+        const ageCheck = this.calculateAge(birthDate);
+        if (!ageCheck.isCompliant) {
             return { 
                 success: false, 
-                error: `You must be at least ${CONFIG.MIN_AGE_YEARS} years old to join ImdConnect.` 
+                error: ageCheck.error || `You must be at least ${CONFIG.MIN_AGE_YEARS} years old to join ImdConnect.` 
             };
         }
 
@@ -111,16 +171,16 @@ class AuthService {
             return { success: false, error: 'Password and password confirmation do not match.' };
         }
 
-        // 2. Pre-flight Username Availability Check
+        // 3. Pre-flight Username Availability Check
         const availability = await this.checkUsernameAvailability(cleanedUsername);
         if (!availability.available) {
             return { 
                 success: false, 
-                error: availability.error || 'This username is already taken. Please choose another.' 
+                error: availability.error || `The username "${cleanedUsername}" is already taken. Please choose another.` 
             };
         }
 
-        // 3. Dispatch Supabase Auth Registration
+        // 4. Dispatch Supabase Auth Registration
         try {
             const { data, error } = await supabase.auth.signUp({
                 email: trimmedEmail,
@@ -137,7 +197,49 @@ class AuthService {
 
             if (error) {
                 console.error('[AuthService] Sign up error:', error);
-                return { success: false, error: error.message || 'Registration failed.' };
+                
+                // Friendly error translation
+                const errMsg = error.message || '';
+                const errStatus = error.status || 0;
+
+                if (errStatus === 429 || errMsg.toLowerCase().includes('rate limit') || errMsg.toLowerCase().includes('over_email_send_rate_limit')) {
+                    return {
+                        success: false,
+                        rateLimited: true,
+                        retryAfter: 30,
+                        error: 'Too many registration requests. Please wait a moment before trying again.'
+                    };
+                }
+
+                if (errMsg.toLowerCase().includes('already registered') || errMsg.toLowerCase().includes('already in use')) {
+                    return {
+                        success: false,
+                        error: 'An account with this email address already exists. Please sign in instead.'
+                    };
+                }
+
+                if (errMsg.includes('chk_profiles_username_format') || errMsg.includes('Username must be 3-30')) {
+                    return {
+                        success: false,
+                        error: 'Username format is invalid. Use 3-30 lowercase letters, numbers, or underscores.'
+                    };
+                }
+
+                if (errMsg.includes('chk_profiles_min_age') || errMsg.includes('at least 13 years old')) {
+                    return {
+                        success: false,
+                        error: `Registration failed: You must be at least ${CONFIG.MIN_AGE_YEARS} years old to join ImdConnect.`
+                    };
+                }
+
+                if (errMsg.includes('profiles_username_key') || errMsg.includes('already registered')) {
+                    return {
+                        success: false,
+                        error: `The username "${cleanedUsername}" is already taken. Please choose another.`
+                    };
+                }
+
+                return { success: false, error: errMsg || 'Registration failed. Please try again.' };
             }
 
             const user = data.user;

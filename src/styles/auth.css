@@ -328,3 +328,84 @@ body {
     border-top: 1px solid var(--border-color);
     padding-top: 1.25rem;
 }
+
+/* ------------------------------------------------------------------------------
+   Registration Live Validation & Feedback Enhancements
+   ------------------------------------------------------------------------------ */
+.form-input.is-valid {
+    border-color: var(--color-success);
+}
+
+.form-input.is-invalid {
+    border-color: var(--color-danger);
+}
+
+.feedback-text {
+    font-size: 0.775rem;
+    font-weight: 500;
+    margin-top: 0.25rem;
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    transition: color var(--transition-fast);
+}
+
+.feedback-valid {
+    color: var(--color-success);
+}
+
+.feedback-invalid {
+    color: var(--color-danger);
+}
+
+.feedback-neutral {
+    color: var(--text-muted);
+}
+
+.age-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.2rem 0.55rem;
+    border-radius: var(--radius-full);
+    font-size: 0.75rem;
+    font-weight: 600;
+    margin-top: 0.35rem;
+}
+
+.age-pill.age-valid {
+    background: rgba(16, 185, 129, 0.12);
+    color: var(--color-success);
+    border: 1px solid rgba(16, 185, 129, 0.25);
+}
+
+.age-pill.age-invalid {
+    background: rgba(239, 68, 68, 0.12);
+    color: var(--color-danger);
+    border: 1px solid rgba(239, 68, 68, 0.25);
+}
+
+.password-checklist {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    margin-top: 0.4rem;
+    padding: 0.5rem 0.75rem;
+    background: var(--bg-surface-elevated);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    font-size: 0.75rem;
+}
+
+.password-criteria-item {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    color: var(--text-muted);
+    transition: color var(--transition-fast);
+}
+
+.password-criteria-item.met {
+    color: var(--color-success);
+    font-weight: 500;
+}
