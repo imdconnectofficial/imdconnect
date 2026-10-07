@@ -252,8 +252,27 @@ export const AppView = {
                     </div>
                 </div>
 
+                <!-- Group Members Management Section (Dynamic for Groups) -->
+                <div class="info-section" id="info-group-members-container" style="display: none;">
+                    <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.65rem;">
+                        <div class="info-section-title" id="info-group-members-title" style="margin: 0;">Members</div>
+                        <button type="button" class="btn-primary" id="btn-info-add-member" style="display: none; padding: 0.25rem 0.65rem; font-size: 0.75rem; border-radius: var(--radius-sm);">
+                            + Add Member
+                        </button>
+                    </div>
+                    <div id="info-group-members-list" class="group-members-list"></div>
+                </div>
+
                 <!-- Chat Settings & Privacy Mode -->
                 <div class="info-section">
+                    <div class="info-list-row" id="row-edit-group-info" style="display: none; cursor: pointer;">
+                        <div>
+                            <div>Edit Group Details</div>
+                            <div style="font-size: 0.75rem; color: var(--text-muted);">Name, description & avatar</div>
+                        </div>
+                        <span style="color: var(--accent); font-weight: 500;">Edit ›</span>
+                    </div>
+
                     <div class="info-list-row" id="row-chat-settings">
                         <span>Chat Settings</span>
                         <span style="color: var(--text-muted);">›</span>
@@ -284,6 +303,22 @@ export const AppView = {
                             <div style="font-size: 0.75rem; color: var(--text-muted);" id="mute-sub-text">Silence alerts for this chat</div>
                         </div>
                         <span id="mute-status-icon" style="font-size: 1.1rem;">🔔</span>
+                    </div>
+
+                    <div class="info-list-row" id="row-leave-group" style="display: none; cursor: pointer; color: var(--danger);">
+                        <div>
+                            <div style="color: var(--danger); font-weight: 500;">Leave Group</div>
+                            <div style="font-size: 0.75rem; color: var(--text-muted);">Exit this group chat</div>
+                        </div>
+                        <span style="font-size: 1.1rem;">🚪</span>
+                    </div>
+
+                    <div class="info-list-row" id="row-delete-group" style="display: none; cursor: pointer; color: var(--danger);">
+                        <div>
+                            <div style="color: var(--danger); font-weight: 600;">Delete Group</div>
+                            <div style="font-size: 0.75rem; color: var(--text-muted);">Owner only: permanently delete</div>
+                        </div>
+                        <span style="font-size: 1.1rem;">🗑️</span>
                     </div>
                 </div>
             </aside>
@@ -711,7 +746,7 @@ export const AppView = {
                 <div class="chat-item-content">
                     <div class="chat-item-top">
                         <div style="display: flex; align-items: center; gap: 0.35rem; min-width: 0;">
-                            <span class="chat-item-name">${conv.title}</span>
+                            <span class="chat-item-name">${conv.type === 'group' ? '👥 ' : ''}${conv.title}</span>
                             ${conv.isMuted ? `<span class="muted-badge-icon" title="Muted">🔕</span>` : ''}
                         </div>
                         <span class="chat-item-time">${conv.lastMessageTime}</span>
@@ -771,7 +806,9 @@ export const AppView = {
         root.querySelector('#chat-header-name').textContent = conv.title;
         
         const statusEl = root.querySelector('#chat-header-status');
-        if (conv.isOnline) {
+        if (conv.type === 'group') {
+            statusEl.textContent = '👥 Group Conversation';
+        } else if (conv.isOnline) {
             statusEl.innerHTML = `<span style="color: var(--color-success); font-weight: 500;">● Online</span>`;
         } else {
             statusEl.textContent = conv.peerUsername ? `@${conv.peerUsername}` : 'Private Chat';
@@ -927,8 +964,14 @@ export const AppView = {
                 row.setAttribute('data-expires-at', m.expiresAt);
             }
 
+            const isGroup = this.state.activeConversation?.type === 'group';
             row.innerHTML = `
                 <div class="message-bubble">
+                    ${!m.isOutgoing && isGroup ? `
+                        <div class="group-sender-header">
+                            <span>@${this.escapeHtml(m.senderUsername || 'user')}</span>
+                        </div>
+                    ` : ''}
                     ${this.escapeHtml(m.text)}
                 </div>
                 <div class="message-meta">
@@ -979,8 +1022,14 @@ export const AppView = {
             row.setAttribute('data-expires-at', m.expiresAt);
         }
 
+        const isGroup = this.state.activeConversation?.type === 'group';
         row.innerHTML = `
             <div class="message-bubble">
+                ${!m.isOutgoing && isGroup ? `
+                    <div class="group-sender-header">
+                        <span>@${this.escapeHtml(m.senderUsername || 'user')}</span>
+                    </div>
+                ` : ''}
                 ${this.escapeHtml(m.text)}
             </div>
             <div class="message-meta">
@@ -1199,28 +1248,192 @@ export const AppView = {
             privacyToggle.checked = !!conv.isPrivacyMode;
         }
 
-        // Fetch peer profile details respecting privacy settings
-        if (conv.peerUsername) {
-            const peerRes = await profileService.getProfile({ username: conv.peerUsername });
-            if (peerRes.success && peerRes.profile) {
-                const peer = peerRes.profile;
-                const coverBox = root.querySelector('#info-cover-box img');
-                if (coverBox && peer.banner_url) {
-                    coverBox.src = peer.banner_url;
+        const isGroup = conv.type === 'group';
+        const groupMembersContainer = root.querySelector('#info-group-members-container');
+        const rowEditGroup = root.querySelector('#row-edit-group-info');
+        const rowLeaveGroup = root.querySelector('#row-leave-group');
+        const rowDeleteGroup = root.querySelector('#row-delete-group');
+        const aboutText = root.querySelector('#info-about-text');
+        const friendsCountEl = root.querySelector('#info-stat-friends');
+        const joinedDateEl = root.querySelector('#info-stat-joined');
+        const statFriendsLabel = root.querySelector('#info-stat-friends')?.parentElement?.querySelector('.info-stat-label');
+        const statHandleLabel = root.querySelector('#info-stat-handle')?.parentElement?.querySelector('.info-stat-label');
+
+        if (isGroup) {
+            root.querySelector('#info-name-text').textContent = conv.title;
+            root.querySelector('#info-handle-text').textContent = '@group';
+            root.querySelector('#info-stat-handle').textContent = 'Group';
+            if (statHandleLabel) statHandleLabel.textContent = 'Type';
+            if (statFriendsLabel) statFriendsLabel.textContent = 'Members';
+            if (joinedDateEl) joinedDateEl.textContent = '2026';
+
+            if (aboutText) {
+                aboutText.textContent = conv.description || 'Welcome to ' + conv.title;
+            }
+
+            // Fetch full group details & members
+            const grpRes = await chatService.getGroupDetails(conv.id);
+            if (grpRes.success) {
+                const groupData = grpRes.group || {};
+                const members = grpRes.members || [];
+                const callerMembership = grpRes.callerMembership || {};
+                const callerRole = callerMembership.role || 'member'; // 'owner' | 'admin' | 'member'
+                const canManage = callerRole === 'owner' || callerRole === 'admin';
+
+                if (friendsCountEl) friendsCountEl.textContent = String(members.length);
+                if (groupData.avatar_url) {
+                    avatarBox.innerHTML = `<img src="${groupData.avatar_url}" alt="${conv.title}" />`;
                 }
 
-                const aboutText = root.querySelector('#info-about-text');
-                const friendsCountEl = root.querySelector('#info-stat-friends');
-                const joinedDateEl = root.querySelector('#info-stat-joined');
+                // Show Group Members Container
+                if (groupMembersContainer) {
+                    groupMembersContainer.style.display = 'block';
+                    root.querySelector('#info-group-members-title').textContent = `Members (${members.length})`;
 
-                if (peer.is_restricted) {
-                    if (aboutText) aboutText.textContent = peer.restricted_reason || 'This profile is private or friends only.';
-                    if (friendsCountEl) friendsCountEl.textContent = '—';
-                    if (joinedDateEl) joinedDateEl.textContent = peer.joinedDateFormatted || 'Private';
-                } else {
-                    if (aboutText) aboutText.textContent = peer.bio || 'Life is better with good conversations.';
-                    if (friendsCountEl) friendsCountEl.textContent = String(peer.friends_count ?? 0);
-                    if (joinedDateEl) joinedDateEl.textContent = peer.joinedDateFormatted || '2026';
+                    const btnAdd = root.querySelector('#btn-info-add-member');
+                    if (btnAdd) {
+                        btnAdd.style.display = canManage ? 'inline-block' : 'none';
+                        btnAdd.onclick = () => this.showAddGroupMembersModal(root, groupData);
+                    }
+
+                    const listEl = root.querySelector('#info-group-members-list');
+                    listEl.innerHTML = '';
+
+                    members.forEach(m => {
+                        const isSelf = m.user_id === this.state.currentUser?.id;
+                        const roleClass = m.role === 'owner' ? 'role-owner' : (m.role === 'admin' ? 'role-admin' : 'role-member');
+                        const roleLabel = m.role === 'owner' ? '👑 Owner' : (m.role === 'admin' ? '🛡️ Admin' : 'Member');
+
+                        const item = document.createElement('div');
+                        item.className = 'group-member-item';
+                        item.innerHTML = `
+                            <div class="group-member-info">
+                                <div class="group-member-avatar">
+                                    ${m.avatar_url ? `<img src="${m.avatar_url}" alt="${m.username}" />` : `<span>${(m.username || 'U').charAt(0).toUpperCase()}</span>`}
+                                </div>
+                                <div class="group-member-text">
+                                    <div class="group-member-name">${this.escapeHtml(m.display_name || m.username)} ${isSelf ? '<span style="font-weight: 400; opacity: 0.7;">(You)</span>' : ''}</div>
+                                    <div class="group-member-handle">@${this.escapeHtml(m.username)}</div>
+                                </div>
+                            </div>
+                            <div class="group-member-actions">
+                                <span class="group-role-badge ${roleClass}">${roleLabel}</span>
+                                <div class="actions-buttons" style="display: flex; gap: 0.25rem;"></div>
+                            </div>
+                        `;
+
+                        const actionsBox = item.querySelector('.actions-buttons');
+
+                        // If not self, display authorized moderation actions
+                        if (!isSelf) {
+                            if (callerRole === 'owner') {
+                                if (m.role === 'admin') {
+                                    const btnDemote = document.createElement('button');
+                                    btnDemote.className = 'btn-member-action';
+                                    btnDemote.textContent = 'Demote';
+                                    btnDemote.title = 'Demote to regular member';
+                                    btnDemote.onclick = async () => {
+                                        if (confirm(`Demote @${m.username} to regular member?`)) {
+                                            const res = await chatService.setGroupMemberRole(conv.id, m.user_id, 'member');
+                                            if (res.success) this.updateInfoPanel(root, conv);
+                                            else alert('Failed: ' + res.error);
+                                        }
+                                    };
+                                    actionsBox.appendChild(btnDemote);
+                                } else {
+                                    const btnPromote = document.createElement('button');
+                                    btnPromote.className = 'btn-member-action';
+                                    btnPromote.textContent = 'Promote';
+                                    btnPromote.title = 'Promote to group admin';
+                                    btnPromote.onclick = async () => {
+                                        if (confirm(`Promote @${m.username} to group admin?`)) {
+                                            const res = await chatService.setGroupMemberRole(conv.id, m.user_id, 'admin');
+                                            if (res.success) this.updateInfoPanel(root, conv);
+                                            else alert('Failed: ' + res.error);
+                                        }
+                                    };
+                                    actionsBox.appendChild(btnPromote);
+                                }
+
+                                const btnTransfer = document.createElement('button');
+                                btnTransfer.className = 'btn-member-action';
+                                btnTransfer.textContent = '👑 Transfer';
+                                btnTransfer.title = 'Transfer ownership to this member';
+                                btnTransfer.onclick = () => this.showTransferOwnershipModal(root, groupData, m);
+                                actionsBox.appendChild(btnTransfer);
+
+                                const btnRemove = document.createElement('button');
+                                btnRemove.className = 'btn-member-action danger';
+                                btnRemove.textContent = '✕ Remove';
+                                btnRemove.onclick = async () => {
+                                    if (confirm(`Remove @${m.username} from group?`)) {
+                                        const res = await chatService.removeGroupMember(conv.id, m.user_id);
+                                        if (res.success) this.updateInfoPanel(root, conv);
+                                        else alert('Failed: ' + res.error);
+                                    }
+                                };
+                                actionsBox.appendChild(btnRemove);
+                            } else if (callerRole === 'admin' && m.role === 'member') {
+                                const btnRemove = document.createElement('button');
+                                btnRemove.className = 'btn-member-action danger';
+                                btnRemove.textContent = '✕ Remove';
+                                btnRemove.onclick = async () => {
+                                    if (confirm(`Remove @${m.username} from group?`)) {
+                                        const res = await chatService.removeGroupMember(conv.id, m.user_id);
+                                        if (res.success) this.updateInfoPanel(root, conv);
+                                        else alert('Failed: ' + res.error);
+                                    }
+                                };
+                                actionsBox.appendChild(btnRemove);
+                            }
+                        }
+
+                        listEl.appendChild(item);
+                    });
+                }
+
+                // Show/hide Group Action Rows
+                if (rowEditGroup) {
+                    rowEditGroup.style.display = canManage ? 'flex' : 'none';
+                    rowEditGroup.onclick = () => this.showEditGroupModal(root, groupData);
+                }
+                if (rowLeaveGroup) {
+                    rowLeaveGroup.style.display = 'flex';
+                    rowLeaveGroup.onclick = () => this.showLeaveGroupModal(root, groupData, members, callerRole);
+                }
+                if (rowDeleteGroup) {
+                    rowDeleteGroup.style.display = (callerRole === 'owner') ? 'flex' : 'none';
+                    rowDeleteGroup.onclick = () => this.showDeleteGroupModal(root, groupData);
+                }
+            }
+        } else {
+            // Direct chat: hide group specific sections
+            if (groupMembersContainer) groupMembersContainer.style.display = 'none';
+            if (rowEditGroup) rowEditGroup.style.display = 'none';
+            if (rowLeaveGroup) rowLeaveGroup.style.display = 'none';
+            if (rowDeleteGroup) rowDeleteGroup.style.display = 'none';
+            if (statHandleLabel) statHandleLabel.textContent = 'Username';
+            if (statFriendsLabel) statFriendsLabel.textContent = 'Friends';
+
+            // Fetch peer profile details respecting privacy settings
+            if (conv.peerUsername) {
+                const peerRes = await profileService.getProfile({ username: conv.peerUsername });
+                if (peerRes.success && peerRes.profile) {
+                    const peer = peerRes.profile;
+                    const coverBox = root.querySelector('#info-cover-box img');
+                    if (coverBox && peer.banner_url) {
+                        coverBox.src = peer.banner_url;
+                    }
+
+                    if (peer.is_restricted) {
+                        if (aboutText) aboutText.textContent = peer.restricted_reason || 'This profile is private or friends only.';
+                        if (friendsCountEl) friendsCountEl.textContent = '—';
+                        if (joinedDateEl) joinedDateEl.textContent = peer.joinedDateFormatted || 'Private';
+                    } else {
+                        if (aboutText) aboutText.textContent = peer.bio || 'Life is better with good conversations.';
+                        if (friendsCountEl) friendsCountEl.textContent = String(peer.friends_count ?? 0);
+                        if (joinedDateEl) joinedDateEl.textContent = peer.joinedDateFormatted || '2026';
+                    }
                 }
             }
         }
@@ -2331,30 +2544,96 @@ export const AppView = {
     },
 
     /**
-     * Create New Group Modal
+     * Create New Group Modal with Avatar, Privacy, Disappearing Timer, and Initial Members
      */
-    showCreateGroupModal(root) {
+    async showCreateGroupModal(root) {
         const modal = root.querySelector('#modal-container');
         modal.style.display = 'flex';
         modal.className = 'modal-overlay';
 
+        // Load user's friends for initial member selection
+        const friends = await chatService.getFriends();
+
         modal.innerHTML = `
-            <div class="modal-dialog">
+            <div class="modal-dialog" style="max-width: 480px;">
                 <div class="modal-dialog-header">
                     <h3 class="modal-dialog-title">Create Group</h3>
                     <button type="button" id="btn-close-grp-modal" class="btn-icon" aria-label="Close modal">✕</button>
                 </div>
                 <div class="modal-dialog-body">
                     <form id="create-grp-form" style="display: flex; flex-direction: column; gap: 1rem;">
-                        <div class="form-group">
-                            <label class="form-label">Group Name</label>
-                            <input type="text" id="grp-name-input" class="form-input" placeholder="e.g. Study Group" required />
+                        <!-- Group Avatar Picker -->
+                        <div style="display: flex; flex-direction: column; align-items: center; gap: 0.5rem; margin-bottom: 0.25rem;">
+                            <div style="position: relative; width: 72px; height: 72px; border-radius: var(--radius-full); background: var(--bg-surface-elevated); border: 2px dashed var(--border-color); display: flex; align-items: center; justify-content: center; cursor: pointer; overflow: hidden;" id="grp-avatar-preview-box">
+                                <span id="grp-avatar-icon" style="font-size: 1.75rem;">👥</span>
+                                <img id="grp-avatar-preview-img" style="display: none; width: 100%; height: 100%; object-fit: cover;" alt="Group avatar preview" />
+                            </div>
+                            <label for="grp-avatar-file" class="btn btn-secondary" style="font-size: 0.75rem; padding: 0.25rem 0.65rem; cursor: pointer;">
+                                📷 Choose Group Icon
+                            </label>
+                            <input type="file" id="grp-avatar-file" accept="image/jpeg,image/png,image/webp" style="display: none;" />
+                            <div style="font-size: 0.7rem; color: var(--text-muted);">Optional (PNG, JPEG, WebP up to 4MB)</div>
                         </div>
+
                         <div class="form-group">
-                            <label class="form-label">Description (Optional)</label>
-                            <input type="text" id="grp-desc-input" class="form-input" placeholder="What is this group about?" />
+                            <label class="form-label" for="grp-name-input">Group Name *</label>
+                            <input type="text" id="grp-name-input" class="form-input" placeholder="e.g. Project Andromeda" required maxlength="100" />
                         </div>
-                        <button type="submit" class="btn-primary" style="margin-top: 0.5rem;">Create Group</button>
+
+                        <div class="form-group">
+                            <label class="form-label" for="grp-desc-input">Description (Optional)</label>
+                            <textarea id="grp-desc-input" class="form-input" placeholder="What is this group about?" rows="2" maxlength="300" style="resize: none;"></textarea>
+                        </div>
+
+                        <div class="form-group">
+                            <label class="form-label" for="grp-timer-select">Disappearing Messages</label>
+                            <select id="grp-timer-select" class="form-input">
+                                <option value="0">Off</option>
+                                <option value="30">30 seconds</option>
+                                <option value="60">1 minute</option>
+                                <option value="180" selected>3 minutes (Default)</option>
+                                <option value="600">10 minutes</option>
+                                <option value="3600">1 hour</option>
+                                <option value="86400">24 hours</option>
+                            </select>
+                        </div>
+
+                        <div style="display: flex; align-items: center; justify-content: space-between; padding: 0.5rem 0; border-top: 1px solid var(--border-color); border-bottom: 1px solid var(--border-color);">
+                            <div>
+                                <div style="font-size: 0.85rem; font-weight: 500;">Privacy Chat Mode</div>
+                                <div style="font-size: 0.75rem; color: var(--text-muted);">Restricts copying & text selection for group members</div>
+                            </div>
+                            <label class="switch" aria-label="Privacy mode toggle">
+                                <input type="checkbox" id="grp-privacy-toggle" />
+                                <span class="slider"></span>
+                            </label>
+                        </div>
+
+                        <!-- Initial Members Selector -->
+                        <div class="form-group">
+                            <label class="form-label">Add Friends to Group (${friends.length} Available)</label>
+                            <div id="grp-friends-selector-list" style="max-height: 140px; overflow-y: auto; display: flex; flex-direction: column; gap: 0.35rem; padding: 0.25rem; border: 1px solid var(--border-color); border-radius: var(--radius-md);">
+                                ${friends.length === 0 ? `
+                                    <div style="font-size: 0.775rem; color: var(--text-muted); padding: 0.5rem; text-align: center;">
+                                        No friends yet. You can add members after creating the group.
+                                    </div>
+                                ` : friends.map(f => `
+                                    <label class="member-select-checkbox-item">
+                                        <input type="checkbox" class="grp-friend-cb" value="${f.id}" />
+                                        <div class="group-member-avatar" style="width: 28px; height: 28px; font-size: 0.75rem;">
+                                            ${f.avatarUrl ? `<img src="${f.avatarUrl}" alt="${f.username}" />` : `<span>${f.username.charAt(0).toUpperCase()}</span>`}
+                                        </div>
+                                        <div style="font-size: 0.8rem; font-weight: 500;">
+                                            ${this.escapeHtml(f.displayName || f.username)} <span style="color: var(--text-muted); font-size: 0.75rem;">@${this.escapeHtml(f.username)}</span>
+                                        </div>
+                                    </label>
+                                `).join('')}
+                            </div>
+                        </div>
+
+                        <button type="submit" id="btn-submit-create-grp" class="btn-primary" style="margin-top: 0.5rem; min-height: 40px;">
+                            Create Group
+                        </button>
                     </form>
                 </div>
             </div>
@@ -2364,18 +2643,456 @@ export const AppView = {
             modal.style.display = 'none';
         });
 
+        // Group avatar file preview
+        let avatarFileToUpload = null;
+        const avatarFileInput = modal.querySelector('#grp-avatar-file');
+        const previewBox = modal.querySelector('#grp-avatar-preview-box');
+        const previewImg = modal.querySelector('#grp-avatar-preview-img');
+        const previewIcon = modal.querySelector('#grp-avatar-icon');
+
+        previewBox.addEventListener('click', () => avatarFileInput.click());
+        avatarFileInput.addEventListener('change', (e) => {
+            const file = e.target.files?.[0];
+            if (file) {
+                avatarFileToUpload = file;
+                const objectUrl = URL.createObjectURL(file);
+                previewImg.src = objectUrl;
+                previewImg.style.display = 'block';
+                previewIcon.style.display = 'none';
+            }
+        });
+
         modal.querySelector('#create-grp-form').addEventListener('submit', async (e) => {
             e.preventDefault();
-            const name = modal.querySelector('#grp-name-input').value;
-            const desc = modal.querySelector('#grp-desc-input').value;
-            const res = await chatService.createGroup({ name, description: desc });
-            if (res.success) {
+            const submitBtn = modal.querySelector('#btn-submit-create-grp');
+            submitBtn.disabled = true;
+            submitBtn.textContent = 'Creating Group...';
+
+            const name = modal.querySelector('#grp-name-input').value.trim();
+            const desc = modal.querySelector('#grp-desc-input').value.trim();
+            const timer = parseInt(modal.querySelector('#grp-timer-select').value, 10);
+            const isPrivacy = modal.querySelector('#grp-privacy-toggle').checked;
+
+            const selectedMemberIds = Array.from(modal.querySelectorAll('.grp-friend-cb:checked')).map(cb => cb.value);
+
+            const res = await chatService.createGroup({
+                name,
+                description: desc,
+                disappearingTimer: timer,
+                isPrivacyMode: isPrivacy,
+                initialMemberIds: selectedMemberIds
+            });
+
+            if (res.success && res.conversationId) {
+                // Upload avatar if chosen
+                if (avatarFileToUpload) {
+                    try {
+                        submitBtn.textContent = 'Uploading group icon...';
+                        await storageService.uploadGroupImage(res.conversationId, avatarFileToUpload, 'avatar');
+                    } catch (uploadErr) {
+                        console.warn('[AppView] Group avatar upload error:', uploadErr);
+                    }
+                }
+
                 modal.style.display = 'none';
                 await this.loadConversations(root);
                 const target = this.state.conversations.find(c => c.id === res.conversationId);
-                if (target) this.selectConversation(root, target);
+                if (target) {
+                    this.selectConversation(root, target);
+                }
+                this.showPrivacyToast(`Group "${name}" created successfully`);
             } else {
-                alert('Failed to create group: ' + res.error);
+                alert('Failed to create group: ' + (res.error || 'Unknown error'));
+                submitBtn.disabled = false;
+                submitBtn.textContent = 'Create Group';
+            }
+        });
+    },
+
+    /**
+     * Add Members Modal (Authorized Owner / Admins)
+     */
+    async showAddGroupMembersModal(root, groupData) {
+        const modal = root.querySelector('#modal-container');
+        modal.style.display = 'flex';
+        modal.className = 'modal-overlay';
+
+        // Fetch user's friends & existing group members
+        const friends = await chatService.getFriends();
+        const grpRes = await chatService.getGroupDetails(groupData.id);
+        const existingMemberIds = new Set((grpRes.members || []).map(m => m.user_id));
+
+        const eligibleFriends = friends.filter(f => !existingMemberIds.has(f.id));
+
+        modal.innerHTML = `
+            <div class="modal-dialog" style="max-width: 440px;">
+                <div class="modal-dialog-header">
+                    <h3 class="modal-dialog-title">Add Members to ${this.escapeHtml(groupData.name)}</h3>
+                    <button type="button" id="btn-close-add-members-modal" class="btn-icon" aria-label="Close modal">✕</button>
+                </div>
+                <div class="modal-dialog-body">
+                    ${eligibleFriends.length === 0 ? `
+                        <div class="empty-state-box" style="padding: 1.5rem 0;">
+                            <div class="empty-state-icon">👥</div>
+                            <h4 style="margin: 0.5rem 0 0.25rem;">No friends available to add</h4>
+                            <p style="font-size: 0.8rem; color: var(--text-muted);">All of your friends are already in this group, or you have not added friends yet.</p>
+                        </div>
+                    ` : `
+                        <p style="font-size: 0.825rem; color: var(--text-secondary); margin-bottom: 0.75rem;">
+                            Select friends to add to this group conversation:
+                        </p>
+                        <form id="add-members-form" style="display: flex; flex-direction: column; gap: 0.75rem;">
+                            <div style="max-height: 220px; overflow-y: auto; display: flex; flex-direction: column; gap: 0.35rem; padding: 0.25rem; border: 1px solid var(--border-color); border-radius: var(--radius-md);">
+                                ${eligibleFriends.map(f => `
+                                    <label class="member-select-checkbox-item">
+                                        <input type="checkbox" class="add-friend-cb" value="${f.id}" />
+                                        <div class="group-member-avatar" style="width: 30px; height: 30px; font-size: 0.75rem;">
+                                            ${f.avatarUrl ? `<img src="${f.avatarUrl}" alt="${f.username}" />` : `<span>${f.username.charAt(0).toUpperCase()}</span>`}
+                                        </div>
+                                        <div style="font-size: 0.8rem; font-weight: 500;">
+                                            ${this.escapeHtml(f.displayName || f.username)} <span style="color: var(--text-muted); font-size: 0.75rem;">@${this.escapeHtml(f.username)}</span>
+                                        </div>
+                                    </label>
+                                `).join('')}
+                            </div>
+                            <button type="submit" id="btn-submit-add-members" class="btn-primary" style="margin-top: 0.5rem;">
+                                Add Selected Members
+                            </button>
+                        </form>
+                    `}
+                </div>
+            </div>
+        `;
+
+        modal.querySelector('#btn-close-add-members-modal').addEventListener('click', () => {
+            modal.style.display = 'none';
+        });
+
+        const form = modal.querySelector('#add-members-form');
+        if (form) {
+            form.addEventListener('submit', async (e) => {
+                e.preventDefault();
+                const selected = Array.from(modal.querySelectorAll('.add-friend-cb:checked')).map(cb => cb.value);
+                if (selected.length === 0) {
+                    alert('Please select at least one friend to add.');
+                    return;
+                }
+
+                const btn = modal.querySelector('#btn-submit-add-members');
+                btn.disabled = true;
+                btn.textContent = 'Adding...';
+
+                const res = await chatService.addGroupMembers(groupData.id, selected);
+                if (res.success) {
+                    modal.style.display = 'none';
+                    if (this.state.activeConversation) {
+                        await this.updateInfoPanel(root, this.state.activeConversation);
+                    }
+                    this.showPrivacyToast(`Added ${selected.length} member(s) to group`);
+                } else {
+                    alert('Failed to add members: ' + res.error);
+                    btn.disabled = false;
+                    btn.textContent = 'Add Selected Members';
+                }
+            });
+        }
+    },
+
+    /**
+     * Edit Group Details Modal (Name, Description, Avatar, Disappearing Timer, Privacy)
+     */
+    showEditGroupModal(root, groupData) {
+        const modal = root.querySelector('#modal-container');
+        modal.style.display = 'flex';
+        modal.className = 'modal-overlay';
+
+        modal.innerHTML = `
+            <div class="modal-dialog" style="max-width: 460px;">
+                <div class="modal-dialog-header">
+                    <h3 class="modal-dialog-title">Edit Group Details</h3>
+                    <button type="button" id="btn-close-edit-grp-modal" class="btn-icon" aria-label="Close modal">✕</button>
+                </div>
+                <div class="modal-dialog-body">
+                    <form id="edit-grp-form" style="display: flex; flex-direction: column; gap: 1rem;">
+                        <!-- Group Avatar -->
+                        <div style="display: flex; flex-direction: column; align-items: center; gap: 0.5rem;">
+                            <div style="position: relative; width: 72px; height: 72px; border-radius: var(--radius-full); background: var(--bg-surface-elevated); border: 2px dashed var(--border-color); display: flex; align-items: center; justify-content: center; cursor: pointer; overflow: hidden;" id="edit-grp-avatar-box">
+                                ${groupData.avatar_url ? `
+                                    <img id="edit-grp-preview-img" src="${groupData.avatar_url}" style="width: 100%; height: 100%; object-fit: cover;" alt="Group avatar" />
+                                    <span id="edit-grp-preview-icon" style="display: none; font-size: 1.75rem;">👥</span>
+                                ` : `
+                                    <span id="edit-grp-preview-icon" style="font-size: 1.75rem;">👥</span>
+                                    <img id="edit-grp-preview-img" style="display: none; width: 100%; height: 100%; object-fit: cover;" alt="Group avatar" />
+                                `}
+                            </div>
+                            <label for="edit-grp-avatar-file" class="btn btn-secondary" style="font-size: 0.75rem; padding: 0.25rem 0.65rem; cursor: pointer;">
+                                📷 Change Group Icon
+                            </label>
+                            <input type="file" id="edit-grp-avatar-file" accept="image/jpeg,image/png,image/webp" style="display: none;" />
+                        </div>
+
+                        <div class="form-group">
+                            <label class="form-label" for="edit-grp-name">Group Name *</label>
+                            <input type="text" id="edit-grp-name" class="form-input" value="${this.escapeHtml(groupData.name || '')}" required maxlength="100" />
+                        </div>
+
+                        <div class="form-group">
+                            <label class="form-label" for="edit-grp-desc">Description</label>
+                            <textarea id="edit-grp-desc" class="form-input" rows="2" maxlength="300" style="resize: none;">${this.escapeHtml(groupData.description || '')}</textarea>
+                        </div>
+
+                        <button type="submit" id="btn-submit-edit-grp" class="btn-primary" style="margin-top: 0.5rem; min-height: 40px;">
+                            Save Changes
+                        </button>
+                    </form>
+                </div>
+            </div>
+        `;
+
+        modal.querySelector('#btn-close-edit-grp-modal').addEventListener('click', () => {
+            modal.style.display = 'none';
+        });
+
+        let newAvatarFile = null;
+        const avatarInput = modal.querySelector('#edit-grp-avatar-file');
+        const previewImg = modal.querySelector('#edit-grp-preview-img');
+        const previewIcon = modal.querySelector('#edit-grp-preview-icon');
+        modal.querySelector('#edit-grp-avatar-box').addEventListener('click', () => avatarInput.click());
+
+        avatarInput.addEventListener('change', (e) => {
+            const file = e.target.files?.[0];
+            if (file) {
+                newAvatarFile = file;
+                previewImg.src = URL.createObjectURL(file);
+                previewImg.style.display = 'block';
+                if (previewIcon) previewIcon.style.display = 'none';
+            }
+        });
+
+        modal.querySelector('#edit-grp-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const btn = modal.querySelector('#btn-submit-edit-grp');
+            btn.disabled = true;
+            btn.textContent = 'Saving...';
+
+            const name = modal.querySelector('#edit-grp-name').value.trim();
+            const desc = modal.querySelector('#edit-grp-desc').value.trim();
+
+            const res = await chatService.updateGroupInfo(groupData.id, {
+                name,
+                description: desc
+            });
+
+            if (res.success) {
+                if (newAvatarFile) {
+                    btn.textContent = 'Uploading icon...';
+                    await storageService.uploadGroupImage(groupData.id, newAvatarFile, 'avatar');
+                }
+
+                modal.style.display = 'none';
+                if (this.state.activeConversation) {
+                    this.state.activeConversation.title = name;
+                    this.state.activeConversation.description = desc;
+                    root.querySelector('#chat-header-name').textContent = name;
+                    await this.updateInfoPanel(root, this.state.activeConversation);
+                }
+                await this.loadConversations(root);
+                this.showPrivacyToast('Group details updated');
+            } else {
+                alert('Failed to update group: ' + res.error);
+                btn.disabled = false;
+                btn.textContent = 'Save Changes';
+            }
+        });
+    },
+
+    /**
+     * Transfer Group Ownership Confirmation Modal
+     */
+    showTransferOwnershipModal(root, groupData, targetMember) {
+        const modal = root.querySelector('#modal-container');
+        modal.style.display = 'flex';
+        modal.className = 'modal-overlay';
+
+        modal.innerHTML = `
+            <div class="modal-dialog" style="max-width: 440px;">
+                <div class="modal-dialog-header">
+                    <h3 class="modal-dialog-title">Transfer Ownership</h3>
+                    <button type="button" id="btn-close-transfer-modal" class="btn-icon" aria-label="Close modal">✕</button>
+                </div>
+                <div class="modal-dialog-body" style="text-align: left;">
+                    <div style="background: rgba(245, 158, 11, 0.1); border: 1px solid rgba(245, 158, 11, 0.3); border-radius: var(--radius-md); padding: 0.85rem; margin-bottom: 1rem; font-size: 0.825rem; color: #f59e0b; line-height: 1.45;">
+                        <strong>⚠️ Ownership Transfer Warning:</strong><br/>
+                        Are you sure you want to transfer ownership of <strong>${this.escapeHtml(groupData.name)}</strong> to <strong>@${this.escapeHtml(targetMember.username)}</strong>?
+                        You will be demoted to Administrator and will no longer have exclusive owner controls.
+                    </div>
+
+                    <div style="display: flex; justify-content: flex-end; gap: 0.5rem;">
+                        <button type="button" class="btn btn-secondary" id="btn-cancel-transfer">Cancel</button>
+                        <button type="button" class="btn btn-primary" id="btn-confirm-transfer" style="background: #f59e0b; border-color: #f59e0b;">
+                            Confirm Transfer
+                        </button>
+                    </div>
+                </div>
+            </div>
+        `;
+
+        const closeModal = () => { modal.style.display = 'none'; };
+        modal.querySelector('#btn-close-transfer-modal').addEventListener('click', closeModal);
+        modal.querySelector('#btn-cancel-transfer').addEventListener('click', closeModal);
+
+        modal.querySelector('#btn-confirm-transfer').addEventListener('click', async () => {
+            const res = await chatService.transferGroupOwnership(groupData.id, targetMember.user_id);
+            if (res.success) {
+                closeModal();
+                if (this.state.activeConversation) {
+                    await this.updateInfoPanel(root, this.state.activeConversation);
+                }
+                this.showPrivacyToast(`Ownership transferred to @${targetMember.username}`);
+            } else {
+                alert('Failed to transfer ownership: ' + res.error);
+            }
+        });
+    },
+
+    /**
+     * Leave Group Modal (With Owner Transfer Safeguards)
+     */
+    showLeaveGroupModal(root, groupData, members, callerRole) {
+        const modal = root.querySelector('#modal-container');
+        modal.style.display = 'flex';
+        modal.className = 'modal-overlay';
+
+        const isOwner = callerRole === 'owner';
+        const otherMembers = members.filter(m => m.user_id !== this.state.currentUser?.id);
+
+        modal.innerHTML = `
+            <div class="modal-dialog" style="max-width: 440px;">
+                <div class="modal-dialog-header">
+                    <h3 class="modal-dialog-title">Leave Group</h3>
+                    <button type="button" id="btn-close-leave-modal" class="btn-icon" aria-label="Close modal">✕</button>
+                </div>
+                <div class="modal-dialog-body" style="text-align: left;">
+                    ${isOwner && otherMembers.length > 0 ? `
+                        <p style="font-size: 0.85rem; color: var(--text-primary); margin-bottom: 0.75rem;">
+                            As the group <strong>Owner</strong>, you must select another member to transfer ownership to before leaving:
+                        </p>
+                        <div class="form-group" style="margin-bottom: 1rem;">
+                            <label class="form-label" for="leave-successor-select">Select New Group Owner *</label>
+                            <select id="leave-successor-select" class="form-input">
+                                ${otherMembers.map(m => `
+                                    <option value="${m.user_id}">@${this.escapeHtml(m.username)} (${this.escapeHtml(m.display_name || m.username)}) - ${m.role}</option>
+                                `).join('')}
+                            </select>
+                        </div>
+                    ` : isOwner && otherMembers.length === 0 ? `
+                        <div style="background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.3); border-radius: var(--radius-md); padding: 0.85rem; margin-bottom: 1rem; font-size: 0.825rem; color: #f87171; line-height: 1.45;">
+                            <strong>Notice:</strong> You are the only member in this group. Leaving will permanently delete the group and all its messages.
+                        </div>
+                    ` : `
+                        <p style="font-size: 0.875rem; color: var(--text-secondary); margin-bottom: 1.25rem;">
+                            Are you sure you want to leave <strong>${this.escapeHtml(groupData.name)}</strong>? You will no longer receive messages from this group.
+                        </p>
+                    `}
+
+                    <div style="display: flex; justify-content: flex-end; gap: 0.5rem;">
+                        <button type="button" class="btn btn-secondary" id="btn-cancel-leave">Cancel</button>
+                        <button type="button" class="btn btn-danger" id="btn-confirm-leave">
+                            ${isOwner && otherMembers.length === 0 ? 'Delete & Leave' : 'Leave Group'}
+                        </button>
+                    </div>
+                </div>
+            </div>
+        `;
+
+        const closeModal = () => { modal.style.display = 'none'; };
+        modal.querySelector('#btn-close-leave-modal').addEventListener('click', closeModal);
+        modal.querySelector('#btn-cancel-leave').addEventListener('click', closeModal);
+
+        modal.querySelector('#btn-confirm-leave').addEventListener('click', async () => {
+            let successorId = null;
+            if (isOwner && otherMembers.length > 0) {
+                const selectEl = modal.querySelector('#leave-successor-select');
+                successorId = selectEl ? selectEl.value : null;
+                if (!successorId) {
+                    alert('Please choose a member to transfer ownership to.');
+                    return;
+                }
+            }
+
+            const res = await chatService.leaveGroup(groupData.id, successorId);
+            if (res.success) {
+                closeModal();
+                this.state.activeConversation = null;
+                root.classList.remove('in-chat');
+                root.querySelector('#chat-header-actions').style.display = 'none';
+                root.querySelector('#chat-input-container').style.display = 'none';
+                root.querySelector('#messages-feed').innerHTML = `
+                    <div class="empty-state-box">
+                        <div class="empty-state-icon">💬</div>
+                        <h3 class="empty-state-title">Select a conversation</h3>
+                    </div>
+                `;
+                await this.loadConversations(root);
+                this.showPrivacyToast('Left group successfully');
+            } else {
+                alert('Failed to leave group: ' + res.error);
+            }
+        });
+    },
+
+    /**
+     * Delete Group Safe Modal (Restricted strictly to Owner)
+     */
+    showDeleteGroupModal(root, groupData) {
+        const modal = root.querySelector('#modal-container');
+        modal.style.display = 'flex';
+        modal.className = 'modal-overlay';
+
+        modal.innerHTML = `
+            <div class="modal-dialog" style="max-width: 420px;">
+                <div class="modal-dialog-header">
+                    <h3 class="modal-dialog-title" style="color: var(--danger);">Delete Group</h3>
+                    <button type="button" id="btn-close-del-grp-modal" class="btn-icon" aria-label="Close modal">✕</button>
+                </div>
+                <div class="modal-dialog-body" style="text-align: left;">
+                    <div style="background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.3); border-radius: var(--radius-md); padding: 0.85rem; margin-bottom: 1rem; font-size: 0.825rem; color: #f87171; line-height: 1.45;">
+                        <strong>⚠️ Irreversible Owner Action:</strong><br/>
+                        Permanently delete <strong>${this.escapeHtml(groupData.name)}</strong>? All messages, members, and settings will be permanently erased.
+                    </div>
+
+                    <div style="display: flex; justify-content: flex-end; gap: 0.5rem;">
+                        <button type="button" class="btn btn-secondary" id="btn-cancel-del-grp">Cancel</button>
+                        <button type="button" class="btn btn-danger" id="btn-confirm-del-grp">
+                            Permanently Delete
+                        </button>
+                    </div>
+                </div>
+            </div>
+        `;
+
+        const closeModal = () => { modal.style.display = 'none'; };
+        modal.querySelector('#btn-close-del-grp-modal').addEventListener('click', closeModal);
+        modal.querySelector('#btn-cancel-del-grp').addEventListener('click', closeModal);
+
+        modal.querySelector('#btn-confirm-del-grp').addEventListener('click', async () => {
+            const res = await chatService.deleteGroup(groupData.id);
+            if (res.success) {
+                closeModal();
+                this.state.activeConversation = null;
+                root.classList.remove('in-chat');
+                root.querySelector('#chat-header-actions').style.display = 'none';
+                root.querySelector('#chat-input-container').style.display = 'none';
+                root.querySelector('#messages-feed').innerHTML = `
+                    <div class="empty-state-box">
+                        <div class="empty-state-icon">💬</div>
+                        <h3 class="empty-state-title">Select a conversation</h3>
+                    </div>
+                `;
+                await this.loadConversations(root);
+                this.showPrivacyToast(`Group "${groupData.name}" deleted`);
+            } else {
+                alert('Failed to delete group: ' + res.error);
             }
         });
     },

@@ -44,15 +44,20 @@ class ChatService {
                 let peerUsername = '';
                 let isOnline = false;
 
+                let description = '';
+                let ownerId = '';
+
                 if (conv.type === 'group') {
                     const { data: grp } = await supabase
                         .from('groups')
-                        .select('name, avatar_url')
+                        .select('name, description, avatar_url, owner_id')
                         .eq('conversation_id', conv.id)
                         .single();
                     if (grp) {
                         title = grp.name;
                         avatarUrl = grp.avatar_url;
+                        description = grp.description || '';
+                        ownerId = grp.owner_id || '';
                     }
                 } else {
                     // Direct 1-on-1: find the other participant
@@ -100,6 +105,8 @@ class ChatService {
                     id: conv.id,
                     type: conv.type,
                     title,
+                    description,
+                    ownerId,
                     peerUsername,
                     avatarUrl,
                     isOnline,
@@ -108,6 +115,7 @@ class ChatService {
                     isPrivacyMode: !!conv.is_privacy_mode || (membership ? !!membership.is_privacy_mode : false),
                     disappearingTimer: conv.disappearing_timer,
                     membership,
+                    userRole: membership?.role || 'member',
                     lastMessage: lastMsg ? lastMsg.ciphertext : 'No messages yet',
                     lastMessageTime: lastMsg ? new Date(lastMsg.sent_at || lastMsg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '',
                     updatedAt: conv.updated_at
@@ -146,38 +154,53 @@ class ChatService {
             }
 
             const now = Date.now();
-            return (data || [])
-                .filter(m => {
-                    if (m.is_deleted_for_all) return false;
-                    if (m.expires_at && new Date(m.expires_at).getTime() <= now) return false;
-                    return true;
-                })
-                .map(m => {
-                    const isOutgoing = m.sender_id === user.id;
-                    const sentAt = m.sent_at || m.created_at;
-                    const deliveredAt = m.delivered_at;
-                    const readAt = m.read_at;
+            const validMsgs = (data || []).filter(m => {
+                if (m.is_deleted_for_all) return false;
+                if (m.expires_at && new Date(m.expires_at).getTime() <= now) return false;
+                return true;
+            });
 
-                    // Compute receipt state: 'sent' (1 tick) | 'delivered' (2 gray ticks) | 'read' (2 blue ticks)
-                    let status = 'sent';
-                    if (readAt) status = 'read';
-                    else if (deliveredAt) status = 'delivered';
+            // Fetch sender profile details for group chats
+            const senderIds = [...new Set(validMsgs.map(m => m.sender_id))];
+            const profilesMap = new Map();
+            if (senderIds.length > 0) {
+                const { data: profiles } = await supabase
+                    .from('public_profiles')
+                    .select('id, username, display_name, avatar_url')
+                    .in('id', senderIds);
+                (profiles || []).forEach(p => profilesMap.set(p.id, p));
+            }
 
-                    return {
-                        id: m.id,
-                        conversationId: m.conversation_id,
-                        senderId: m.sender_id,
-                        isOutgoing,
-                        text: m.ciphertext,
-                        sentAt,
-                        deliveredAt,
-                        readAt,
-                        status,
-                        timeFormatted: new Date(sentAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-                        expiresAt: m.expires_at,
-                        messageType: m.message_type
-                    };
-                });
+            return validMsgs.map(m => {
+                const isOutgoing = m.sender_id === user.id;
+                const sentAt = m.sent_at || m.created_at;
+                const deliveredAt = m.delivered_at;
+                const readAt = m.read_at;
+                const senderProfile = profilesMap.get(m.sender_id);
+
+                // Compute receipt state: 'sent' (1 tick) | 'delivered' (2 gray ticks) | 'read' (2 blue ticks)
+                let status = 'sent';
+                if (readAt) status = 'read';
+                else if (deliveredAt) status = 'delivered';
+
+                return {
+                    id: m.id,
+                    conversationId: m.conversation_id,
+                    senderId: m.sender_id,
+                    senderUsername: senderProfile?.username || '',
+                    senderName: senderProfile?.display_name || senderProfile?.username || 'User',
+                    senderAvatar: senderProfile?.avatar_url || '',
+                    isOutgoing,
+                    text: m.ciphertext,
+                    sentAt,
+                    deliveredAt,
+                    readAt,
+                    status,
+                    timeFormatted: new Date(sentAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+                    expiresAt: m.expires_at,
+                    messageType: m.message_type
+                };
+            });
         } catch (err) {
             console.error('[ChatService] getMessages exception:', err);
             return [];
@@ -501,13 +524,18 @@ class ChatService {
     }
 
     /**
-     * Create a new Group
+     * Create a new Group Chat
      * @param {Object} params
      * @param {string} params.name
      * @param {string} [params.description]
+     * @param {string} [params.avatarUrl]
+     * @param {boolean} [params.isPublic]
+     * @param {Array<string>} [params.initialMemberIds]
+     * @param {number} [params.disappearingTimer]
+     * @param {boolean} [params.isPrivacyMode]
      * @returns {Promise<{ success: boolean, conversationId?: string, error?: string }>}
      */
-    async createGroup({ name, description }) {
+    async createGroup({ name, description, avatarUrl, isPublic = false, initialMemberIds = [], disappearingTimer = 180, isPrivacyMode = false }) {
         const user = await authService.getUser();
         if (!user) return { success: false, error: 'Unauthenticated' };
 
@@ -515,12 +543,28 @@ class ChatService {
         if (!trimmedName) return { success: false, error: 'Group name is required.' };
 
         try {
-            // 1. Create conversation container with default 3-minute (180s) disappearing timer
+            // 1. Primary: Call atomic RPC create_group_chat
+            const { data, error } = await supabase.rpc('create_group_chat', {
+                p_name: trimmedName,
+                p_description: (description || '').trim() || null,
+                p_avatar_url: avatarUrl || null,
+                p_is_public: !!isPublic,
+                p_initial_member_ids: initialMemberIds || [],
+                p_disappearing_timer: parseInt(disappearingTimer, 10) || 180,
+                p_is_privacy_mode: !!isPrivacyMode
+            });
+
+            if (!error && data?.success) {
+                return { success: true, conversationId: data.conversation_id };
+            }
+
+            // Fallback direct table insertions if RPC not deployed yet
             const { data: conv, error: convErr } = await supabase
                 .from('conversations')
                 .insert({
                     type: 'group',
-                    disappearing_timer: 180,
+                    disappearing_timer: parseInt(disappearingTimer, 10) || 180,
+                    is_privacy_mode: !!isPrivacyMode,
                     created_by: user.id
                 })
                 .select()
@@ -528,23 +572,24 @@ class ChatService {
 
             if (convErr) throw convErr;
 
-            // 2. Create group record
             const { error: grpErr } = await supabase
                 .from('groups')
                 .insert({
                     conversation_id: conv.id,
                     name: trimmedName,
                     description: (description || '').trim(),
-                    owner_id: user.id
+                    avatar_url: avatarUrl || null,
+                    owner_id: user.id,
+                    is_public: !!isPublic
                 });
 
             if (grpErr) throw grpErr;
 
-            // 3. Add owner to conversation_members & group_members
             await supabase.from('conversation_members').insert({
                 conversation_id: conv.id,
                 user_id: user.id,
-                role: 'owner'
+                role: 'owner',
+                is_privacy_mode: !!isPrivacyMode
             });
 
             await supabase.from('group_members').insert({
@@ -556,15 +601,266 @@ class ChatService {
                 can_change_info: true
             });
 
-            // 4. Create default group settings
             await supabase.from('group_settings').insert({
-                group_id: conv.id
+                group_id: conv.id,
+                disappearing_timer: parseInt(disappearingTimer, 10) || 180
             });
 
             return { success: true, conversationId: conv.id };
         } catch (err) {
             console.error('[ChatService] createGroup error:', err);
             return { success: false, error: err.message || 'Failed to create group.' };
+        }
+    }
+
+    /**
+     * Get complete Group details with settings and members list
+     * @param {string} groupId 
+     * @returns {Promise<{ success: boolean, group?: Object, callerMembership?: Object, settings?: Object, members?: Array, error?: string }>}
+     */
+    async getGroupDetails(groupId) {
+        if (!groupId) return { success: false, error: 'Group ID is required.' };
+
+        try {
+            // 1. Try atomic RPC get_group_full_details
+            const { data, error } = await supabase.rpc('get_group_full_details', {
+                p_group_id: groupId
+            });
+
+            if (!error && data?.success) {
+                return {
+                    success: true,
+                    group: data.group,
+                    callerMembership: data.caller_membership,
+                    settings: data.settings,
+                    members: data.members || []
+                };
+            }
+
+            // Fallback direct tables
+            const { data: grp } = await supabase
+                .from('groups')
+                .select('*')
+                .eq('conversation_id', groupId)
+                .single();
+
+            const { data: conv } = await supabase
+                .from('conversations')
+                .select('*')
+                .eq('id', groupId)
+                .single();
+
+            const { data: members } = await supabase
+                .from('group_members')
+                .select(`
+                    user_id, role, joined_at,
+                    profiles:user_id (id, username, display_name, avatar_url, last_seen_at)
+                `)
+                .eq('group_id', groupId);
+
+            const user = await authService.getUser();
+            const callerMem = members?.find(m => m.user_id === user?.id);
+
+            const formattedMembers = (members || []).map(m => {
+                const p = m.profiles || {};
+                return {
+                    user_id: m.user_id,
+                    role: m.role,
+                    joined_at: m.joined_at,
+                    username: p.username || 'user',
+                    display_name: p.display_name || p.username || 'User',
+                    avatar_url: p.avatar_url || '',
+                    last_seen_at: p.last_seen_at
+                };
+            });
+
+            return {
+                success: true,
+                group: {
+                    ...grp,
+                    disappearing_timer: conv?.disappearing_timer || 0,
+                    is_privacy_mode: conv?.is_privacy_mode || false
+                },
+                callerMembership: callerMem || { role: 'member' },
+                settings: {},
+                members: formattedMembers
+            };
+        } catch (err) {
+            console.error('[ChatService] getGroupDetails error:', err);
+            return { success: false, error: err.message };
+        }
+    }
+
+    /**
+     * Add members to group
+     * @param {string} groupId 
+     * @param {Array<string>} userIds 
+     * @returns {Promise<{ success: boolean, added_count?: number, error?: string }>}
+     */
+    async addGroupMembers(groupId, userIds) {
+        if (!groupId || !userIds || userIds.length === 0) {
+            return { success: false, error: 'Group ID and user IDs required.' };
+        }
+
+        try {
+            const { data, error } = await supabase.rpc('add_group_members', {
+                p_group_id: groupId,
+                p_user_ids: userIds
+            });
+
+            if (error) throw error;
+            return { success: true, added_count: data?.added_count || userIds.length };
+        } catch (err) {
+            console.error('[ChatService] addGroupMembers error:', err);
+            return { success: false, error: err.message || 'Failed to add group members.' };
+        }
+    }
+
+    /**
+     * Remove member from group (Owner or Admin authorization with owner safeguard)
+     * @param {string} groupId 
+     * @param {string} targetUserId 
+     * @returns {Promise<{ success: boolean, error?: string }>}
+     */
+    async removeGroupMember(groupId, targetUserId) {
+        if (!groupId || !targetUserId) return { success: false, error: 'Group ID and target user required.' };
+
+        try {
+            const { data, error } = await supabase.rpc('remove_group_member', {
+                p_group_id: groupId,
+                p_target_user_id: targetUserId
+            });
+
+            if (error) throw error;
+            return { success: true };
+        } catch (err) {
+            console.error('[ChatService] removeGroupMember error:', err);
+            return { success: false, error: err.message || 'Failed to remove member.' };
+        }
+    }
+
+    /**
+     * Set member role (Promote / Demote Admins - Restricted to Owner)
+     * @param {string} groupId 
+     * @param {string} targetUserId 
+     * @param {'admin'|'member'} newRole 
+     * @returns {Promise<{ success: boolean, error?: string }>}
+     */
+    async setGroupMemberRole(groupId, targetUserId, newRole) {
+        if (!groupId || !targetUserId || !newRole) {
+            return { success: false, error: 'Parameters missing.' };
+        }
+
+        try {
+            const { data, error } = await supabase.rpc('set_group_member_role', {
+                p_group_id: groupId,
+                p_target_user_id: targetUserId,
+                p_new_role: newRole
+            });
+
+            if (error) throw error;
+            return { success: true, newRole };
+        } catch (err) {
+            console.error('[ChatService] setGroupMemberRole error:', err);
+            return { success: false, error: err.message || 'Failed to change member role.' };
+        }
+    }
+
+    /**
+     * Transfer group ownership
+     * @param {string} groupId 
+     * @param {string} newOwnerId 
+     * @returns {Promise<{ success: boolean, error?: string }>}
+     */
+    async transferGroupOwnership(groupId, newOwnerId) {
+        if (!groupId || !newOwnerId) return { success: false, error: 'New owner required.' };
+
+        try {
+            const { data, error } = await supabase.rpc('transfer_group_ownership', {
+                p_group_id: groupId,
+                p_new_owner_id: newOwnerId
+            });
+
+            if (error) throw error;
+            return { success: true };
+        } catch (err) {
+            console.error('[ChatService] transferGroupOwnership error:', err);
+            return { success: false, error: err.message || 'Failed to transfer ownership.' };
+        }
+    }
+
+    /**
+     * Leave group (With owner transfer safeguard or safe cleanup)
+     * @param {string} groupId 
+     * @param {string|null} [transferToUserId=null] 
+     * @returns {Promise<{ success: boolean, action?: string, error?: string }>}
+     */
+    async leaveGroup(groupId, transferToUserId = null) {
+        if (!groupId) return { success: false, error: 'Group ID required.' };
+
+        try {
+            const { data, error } = await supabase.rpc('leave_group', {
+                p_group_id: groupId,
+                p_transfer_to_user_id: transferToUserId || null
+            });
+
+            if (error) throw error;
+            return { success: true, action: data?.action };
+        } catch (err) {
+            console.error('[ChatService] leaveGroup error:', err);
+            return { success: false, error: err.message || 'Failed to leave group.' };
+        }
+    }
+
+    /**
+     * Safely delete group (Owner only)
+     * @param {string} groupId 
+     * @returns {Promise<{ success: boolean, error?: string }>}
+     */
+    async deleteGroup(groupId) {
+        if (!groupId) return { success: false, error: 'Group ID required.' };
+
+        try {
+            const { data, error } = await supabase.rpc('delete_group_safe', {
+                p_group_id: groupId
+            });
+
+            if (error) throw error;
+            return { success: true };
+        } catch (err) {
+            console.error('[ChatService] deleteGroup error:', err);
+            return { success: false, error: err.message || 'Failed to delete group.' };
+        }
+    }
+
+    /**
+     * Update group metadata & settings (Name, Description, Avatar, Disappearing Timer, Privacy)
+     * @param {string} groupId 
+     * @param {Object} payload 
+     * @returns {Promise<{ success: boolean, error?: string }>}
+     */
+    async updateGroupInfo(groupId, payload = {}) {
+        if (!groupId) return { success: false, error: 'Group ID required.' };
+
+        try {
+            const { data, error } = await supabase.rpc('update_group_info_and_settings', {
+                p_group_id: groupId,
+                p_name: payload.name || null,
+                p_description: payload.description !== undefined ? payload.description : null,
+                p_avatar_url: payload.avatarUrl !== undefined ? payload.avatarUrl : null,
+                p_is_public: payload.isPublic !== undefined ? payload.isPublic : null,
+                p_disappearing_timer: payload.disappearingTimer !== undefined ? parseInt(payload.disappearingTimer, 10) : null,
+                p_is_privacy_mode: payload.isPrivacyMode !== undefined ? payload.isPrivacyMode : null,
+                p_who_can_send: payload.whoCanSend || null,
+                p_who_can_edit: payload.whoCanEdit || null,
+                p_who_can_invite: payload.whoCanInvite || null
+            });
+
+            if (error) throw error;
+            return { success: true };
+        } catch (err) {
+            console.error('[ChatService] updateGroupInfo error:', err);
+            return { success: false, error: err.message || 'Failed to update group settings.' };
         }
     }
 
