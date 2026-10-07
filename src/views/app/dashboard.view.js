@@ -1,7 +1,8 @@
 // ==============================================================================
-// ImdConnect — Authenticated Dashboard View (Account & Security Center)
+// ImdConnect — Authenticated Dashboard View (Account & Identity Media)
 // ==============================================================================
 import { authService } from '../../services/auth.service.js';
+import { storageService } from '../../services/storage.service.js';
 import { supabase } from '../../core/supabase.js';
 import { router } from '../../core/router.js';
 
@@ -25,25 +26,56 @@ export const DashboardView = {
         const username = profile?.username || user?.user_metadata?.username || 'user';
         const displayName = profile?.display_name || user?.user_metadata?.display_name || username;
         const email = user?.email || 'private';
+        const avatarUrl = profile?.avatar_url || '';
+        const bannerUrl = profile?.banner_url || '';
 
         container.innerHTML = `
-            <div class="auth-card" style="max-width: 520px;" role="region" aria-label="Account Settings Card">
-                <header class="auth-header">
-                    <a href="#/" class="auth-brand">
+            <div class="auth-card" style="max-width: 540px;" role="region" aria-label="Account Settings Card">
+                
+                <!-- User Cover / Banner Preview -->
+                <div style="position: relative; height: 120px; border-radius: var(--radius-md) var(--radius-md) 0 0; background: var(--bg-surface-elevated); overflow: hidden; margin: -2rem -1.5rem 2rem -1.5rem; border-bottom: 1px solid var(--border-color);">
+                    <img 
+                        id="cover-preview-img" 
+                        src="${bannerUrl || 'data:image/svg+xml,%3Csvg xmlns=\\'http://www.w3.org/2000/svg\\' width=\\'100\\' height=\\'100\\'%3E%3Crect width=\\'100\\' height=\\'100\\' fill=\\'%231e293b\\'/%3E%3C/svg%3E'}" 
+                        style="width: 100%; height: 100%; object-fit: cover;" 
+                        alt="Profile cover banner"
+                    />
+                    <label for="cover-file-input" style="position: absolute; right: 0.75rem; bottom: 0.75rem; background: rgba(0,0,0,0.6); color: #fff; padding: 0.35rem 0.65rem; border-radius: var(--radius-sm); font-size: 0.75rem; cursor: pointer; user-select: none;">
+                        📷 Change Banner
+                    </label>
+                    <input type="file" id="cover-file-input" accept="image/jpeg,image/png,image/webp" style="display: none;" />
+                </div>
+
+                <header class="auth-header" style="position: relative; margin-top: -3.5rem;">
+                    <!-- User Avatar Circle -->
+                    <div style="position: relative; width: 84px; height: 84px; margin: 0 auto 0.75rem auto; border-radius: 50%; border: 3px solid var(--bg-surface); overflow: hidden; background: var(--color-primary-600); display: flex; align-items: center; justify-content: center; box-shadow: var(--shadow-md);">
+                        <img 
+                            id="avatar-preview-img" 
+                            src="${avatarUrl || 'data:image/svg+xml,%3Csvg xmlns=\\'http://www.w3.org/2000/svg\\' width=\\'100\\' height=\\'100\\'%3E%3Ctext x=\\'50%\\' y=\\'55%\\' dominant-baseline=\\'middle\\' text-anchor=\\'middle\\' fill=\\'%23ffffff\\' font-size=\\'36\\' font-family=\\'sans-serif\\'%3E${username.charAt(0).toUpperCase()}%3C/text%3E%3C/svg%3E'}" 
+                            style="width: 100%; height: 100%; object-fit: cover;" 
+                            alt="Profile avatar"
+                        />
+                        <label for="avatar-file-input" style="position: absolute; inset: 0; background: rgba(0,0,0,0.4); opacity: 0; display: flex; align-items: center; justify-content: center; color: #fff; font-size: 1.25rem; cursor: pointer; transition: opacity var(--transition-fast);" onmouseover="this.style.opacity='1'" onmouseout="this.style.opacity='0'">
+                            📷
+                        </label>
+                        <input type="file" id="avatar-file-input" accept="image/jpeg,image/png,image/webp" style="display: none;" />
+                    </div>
+
+                    <a href="#/" class="auth-brand" style="margin-bottom: 0.25rem;">
                         <span>ImdConnect</span>
-                        <span class="auth-brand-badge">Online</span>
+                        <span class="auth-brand-badge">Text Only Chat</span>
                     </a>
-                    <h1 class="auth-title">Account Center</h1>
-                    <p class="auth-subtitle">Signed in as <strong>@${username}</strong> (${displayName})</p>
+                    <h1 class="auth-title">@${username}</h1>
+                    <p class="auth-subtitle">${displayName}</p>
                 </header>
 
                 <div id="dash-alert-area" aria-live="polite"></div>
 
                 <div class="auth-form">
-                    <!-- Profile Summary Box -->
+                    <!-- Profile Details Summary -->
                     <div style="background: var(--bg-surface-elevated); padding: 1rem; border-radius: var(--radius-md); font-size: 0.875rem;">
                         <div style="display: flex; justify-content: space-between; margin-bottom: 0.5rem;">
-                            <span style="color: var(--text-muted);">Username:</span>
+                            <span style="color: var(--text-muted);">Handle:</span>
                             <strong>@${username}</strong>
                         </div>
                         <div style="display: flex; justify-content: space-between; margin-bottom: 0.5rem;">
@@ -51,8 +83,8 @@ export const DashboardView = {
                             <span>${email}</span>
                         </div>
                         <div style="display: flex; justify-content: space-between;">
-                            <span style="color: var(--text-muted);">User ID:</span>
-                            <code style="font-size: 0.75rem; font-family: var(--font-mono);">${user?.id?.slice(0, 8)}...</code>
+                            <span style="color: var(--text-muted);">Chat Type:</span>
+                            <span style="color: var(--status-success); font-weight: 600;">Strictly Text-Only</span>
                         </div>
                     </div>
 
@@ -103,7 +135,7 @@ export const DashboardView = {
                     </div>
 
                     <!-- Account Deactivation & Deletion -->
-                    <div style="display: flex; gap: 0.75rem; flex-wrap: wrap; margin-top: 0.5rem;">
+                    <div style="display: flex; gap: 0.75rem; flex-wrap: wrap; margin-top: 0.25rem;">
                         <button type="button" id="btn-deactivate" class="btn-secondary" style="color: var(--status-warning); border-color: rgba(245, 158, 11, 0.4); flex: 1;">
                             Deactivate Account
                         </button>
@@ -114,7 +146,7 @@ export const DashboardView = {
                 </div>
 
                 <footer class="auth-footer">
-                    <span>ImdConnect v1.0 • Privacy-Focused Architecture</span>
+                    <span>ImdConnect • End-to-End Encrypted Text Messaging</span>
                 </footer>
             </div>
         `;
@@ -131,6 +163,67 @@ export const DashboardView = {
         const logoutAllBtn = root.querySelector('#btn-logout-all');
         const deactivateBtn = root.querySelector('#btn-deactivate');
         const deleteBtn = root.querySelector('#btn-delete');
+
+        const avatarInput = root.querySelector('#avatar-file-input');
+        const avatarImg = root.querySelector('#avatar-preview-img');
+        const coverInput = root.querySelector('#cover-file-input');
+        const coverImg = root.querySelector('#cover-preview-img');
+
+        // Avatar Upload Handler
+        avatarInput.addEventListener('change', async (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            alertArea.innerHTML = `
+                <div class="alert-box alert-info">
+                    <span>Processing and uploading avatar...</span>
+                </div>
+            `;
+
+            const res = await storageService.uploadAvatar(file);
+            if (!res.success) {
+                alertArea.innerHTML = `
+                    <div class="alert-box alert-error" role="alert">
+                        <span>${res.error}</span>
+                    </div>
+                `;
+            } else {
+                avatarImg.src = res.url;
+                alertArea.innerHTML = `
+                    <div class="alert-box alert-success" role="status">
+                        <span>Avatar updated successfully!</span>
+                    </div>
+                `;
+            }
+        });
+
+        // Cover Upload Handler
+        coverInput.addEventListener('change', async (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            alertArea.innerHTML = `
+                <div class="alert-box alert-info">
+                    <span>Processing and uploading cover banner...</span>
+                </div>
+            `;
+
+            const res = await storageService.uploadCover(file);
+            if (!res.success) {
+                alertArea.innerHTML = `
+                    <div class="alert-box alert-error" role="alert">
+                        <span>${res.error}</span>
+                    </div>
+                `;
+            } else {
+                coverImg.src = res.url;
+                alertArea.innerHTML = `
+                    <div class="alert-box alert-success" role="status">
+                        <span>Banner updated successfully!</span>
+                    </div>
+                `;
+            }
+        });
 
         // Theme Initializer
         const savedTheme = localStorage.getItem('imd_theme') || 'system';
@@ -197,7 +290,7 @@ export const DashboardView = {
             }
         });
 
-        // Delete Account (GDPR cascade)
+        // Delete Account
         deleteBtn.addEventListener('click', async () => {
             const promptConfirm = prompt('WARNING: This permanently deletes your account, username, and all messages. Type "DELETE" to confirm:');
             if (promptConfirm === 'DELETE') {
