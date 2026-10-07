@@ -234,6 +234,127 @@ class SettingsService {
             return { success: false, error: err.message };
         }
     }
+
+    /**
+     * Get active sessions for current user
+     * @returns {Promise<Array>}
+     */
+    async getActiveSessions() {
+        const user = await authService.getUser();
+        if (!user) return [];
+
+        try {
+            // Try RPC first
+            const { data, error } = await supabase.rpc('get_user_sessions');
+            if (!error && Array.isArray(data)) {
+                return data;
+            }
+
+            // Fallback to direct table query
+            const { data: sessions, error: tableErr } = await supabase
+                .from('user_sessions')
+                .select('*')
+                .eq('user_id', user.id)
+                .eq('is_revoked', false)
+                .order('last_active_at', { ascending: false });
+
+            if (tableErr) {
+                console.warn('[SettingsService] getActiveSessions table fallback error:', tableErr);
+                return [];
+            }
+            return sessions || [];
+        } catch (err) {
+            console.error('[SettingsService] getActiveSessions exception:', err);
+            return [];
+        }
+    }
+
+    /**
+     * Revoke a specific active session
+     * @param {string} sessionId
+     * @returns {Promise<{ success: boolean, error?: string }>}
+     */
+    async revokeSession(sessionId) {
+        if (!sessionId) return { success: false, error: 'Session ID required' };
+        const user = await authService.getUser();
+        if (!user) return { success: false, error: 'Unauthenticated' };
+
+        try {
+            const { data, error } = await supabase.rpc('revoke_user_session', {
+                p_session_id: sessionId
+            });
+
+            if (!error) return { success: true };
+
+            // Fallback to direct update
+            const { error: updErr } = await supabase
+                .from('user_sessions')
+                .update({ is_revoked: true })
+                .eq('id', sessionId)
+                .eq('user_id', user.id);
+
+            if (updErr) throw updErr;
+            return { success: true };
+        } catch (err) {
+            console.error('[SettingsService] revokeSession error:', err);
+            return { success: false, error: err.message };
+        }
+    }
+
+    /**
+     * Get login history audit trail
+     * @param {number} [limit=20]
+     * @returns {Promise<Array>}
+     */
+    async getLoginHistory(limit = 20) {
+        const user = await authService.getUser();
+        if (!user) return [];
+
+        try {
+            const { data, error } = await supabase.rpc('get_login_history', {
+                p_limit: limit
+            });
+
+            if (!error && Array.isArray(data)) {
+                return data;
+            }
+
+            // Fallback to direct table query
+            const { data: history, error: tableErr } = await supabase
+                .from('login_history')
+                .select('*')
+                .eq('user_id', user.id)
+                .order('created_at', { ascending: false })
+                .limit(limit);
+
+            if (tableErr) {
+                console.warn('[SettingsService] getLoginHistory table fallback error:', tableErr);
+                return [];
+            }
+            return history || [];
+        } catch (err) {
+            console.error('[SettingsService] getLoginHistory exception:', err);
+            return [];
+        }
+    }
+
+    /**
+     * Record login audit entry
+     * @param {boolean} success
+     * @param {string} [failureReason]
+     * @returns {Promise<void>}
+     */
+    async recordLoginAudit(success, failureReason = null) {
+        try {
+            await supabase.rpc('record_login_audit', {
+                p_success: success,
+                p_failure_reason: failureReason,
+                p_user_agent: navigator.userAgent
+            });
+        } catch (e) {
+            console.warn('[SettingsService] recordLoginAudit non-fatal error:', e);
+        }
+    }
 }
 
 export const settingsService = new SettingsService();
