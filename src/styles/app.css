@@ -1380,3 +1380,246 @@ input:checked + .slider:before {
     }
 }
 
+/* ==============================================================================
+   Social & Friend System UI Elements
+   ============================================================================== */
+.friends-nav-bar {
+    display: flex;
+    gap: 0.35rem;
+    padding: 0.75rem 1rem 0.5rem 1rem;
+    overflow-x: auto;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.friends-nav-bar::-webkit-scrollbar {
+    display: none;
+}
+
+.friends-subtab-pill {
+    white-space: nowrap;
+    padding: 0.4rem 0.8rem;
+    border-radius: var(--radius-full);
+    font-size: 0.8rem;
+    font-weight: 500;
+    cursor: pointer;
+    border: 1px solid var(--border-color);
+    background: var(--bg-surface);
+    color: var(--text-secondary);
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    transition: all var(--transition-fast);
+}
+
+.friends-subtab-pill:hover {
+    background: var(--bg-surface-hover);
+    color: var(--text-primary);
+}
+
+.friends-subtab-pill.active {
+    background: var(--accent-light);
+    color: var(--accent);
+    border-color: var(--accent);
+    font-weight: 600;
+}
+
+.friends-pill-badge {
+    padding: 0.1rem 0.45rem;
+    border-radius: 999px;
+    font-size: 0.7rem;
+    font-weight: 700;
+    background: var(--border-color);
+    color: var(--text-primary);
+}
+
+.friends-subtab-pill.active .friends-pill-badge {
+    background: var(--accent);
+    color: var(--accent-contrast);
+}
+
+.friends-pill-badge.badge-alert {
+    background: var(--danger);
+    color: #ffffff;
+}
+
+.friends-search-header-box {
+    padding: 0.75rem 1rem 0.25rem 1rem;
+    display: flex;
+    gap: 0.5rem;
+}
+
+.friends-search-input {
+    flex: 1;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    padding: 0.55rem 0.85rem;
+    font-size: 0.85rem;
+    color: var(--text-primary);
+    outline: none;
+    transition: border-color var(--transition-fast);
+}
+
+.friends-search-input:focus {
+    border-color: var(--accent);
+}
+
+.friend-item-row {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.85rem 1rem;
+    border-bottom: 1px solid var(--border-color);
+    transition: background var(--transition-fast);
+    position: relative;
+}
+
+.friend-item-row:hover {
+    background: var(--bg-surface-hover);
+}
+
+.friend-item-avatar-col {
+    position: relative;
+    flex-shrink: 0;
+}
+
+.friend-item-info {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+}
+
+.friend-item-header {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.friend-item-name {
+    font-weight: 600;
+    font-size: 0.9rem;
+    color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.friend-item-handle {
+    font-size: 0.8rem;
+    color: var(--text-muted);
+}
+
+.friend-item-bio {
+    font-size: 0.775rem;
+    color: var(--text-secondary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.friend-item-time {
+    font-size: 0.725rem;
+    color: var(--text-muted);
+}
+
+.friend-item-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    flex-shrink: 0;
+}
+
+.btn-friend-action {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.3rem;
+    padding: 0.35rem 0.75rem;
+    font-size: 0.775rem;
+    font-weight: 600;
+    border-radius: var(--radius-md);
+    cursor: pointer;
+    border: none;
+    transition: all var(--transition-fast);
+    min-height: 32px;
+    white-space: nowrap;
+}
+
+.btn-friend-primary {
+    background: var(--accent);
+    color: var(--accent-contrast);
+}
+
+.btn-friend-primary:hover:not(:disabled) {
+    background: var(--accent-hover);
+}
+
+.btn-friend-secondary {
+    background: var(--bg-surface);
+    color: var(--text-primary);
+    border: 1px solid var(--border-color);
+}
+
+.btn-friend-secondary:hover:not(:disabled) {
+    background: var(--bg-surface-hover);
+}
+
+.btn-friend-danger {
+    background: transparent;
+    color: var(--danger);
+    border: 1px solid rgba(239, 68, 68, 0.4);
+}
+
+.btn-friend-danger:hover:not(:disabled) {
+    background: rgba(239, 68, 68, 0.12);
+}
+
+.btn-friend-muted {
+    background: var(--bg-surface);
+    color: var(--text-muted);
+    border: 1px solid var(--border-color);
+    cursor: default;
+}
+
+.social-dropdown-menu {
+    position: absolute;
+    right: 1rem;
+    top: 3.25rem;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-lg);
+    z-index: 50;
+    display: flex;
+    flex-direction: column;
+    min-width: 150px;
+    overflow: hidden;
+}
+
+.social-dropdown-item {
+    padding: 0.6rem 0.9rem;
+    font-size: 0.8rem;
+    color: var(--text-primary);
+    background: none;
+    border: none;
+    text-align: left;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    transition: background var(--transition-fast);
+}
+
+.social-dropdown-item:hover {
+    background: var(--bg-surface-hover);
+}
+
+.social-dropdown-item.text-danger {
+    color: var(--danger);
+}
+
+

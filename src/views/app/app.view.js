@@ -5,6 +5,7 @@
 // ==============================================================================
 import { authService } from '../../services/auth.service.js';
 import { chatService } from '../../services/chat.service.js';
+import { friendService } from '../../services/friend.service.js';
 import { realtimeService } from '../../services/realtime.service.js';
 import { storageService } from '../../services/storage.service.js';
 import { profileService } from '../../services/profile.service.js';
@@ -15,10 +16,16 @@ import { router } from '../../core/router.js';
 export const AppView = {
     state: {
         activeTab: 'chats', // 'chats' | 'friends' | 'groups' | 'notifications' | 'profile' | 'settings'
+        activeFriendsSubTab: 'all', // 'all' | 'incoming' | 'outgoing' | 'search' | 'blocked'
         activeConversation: null,
         conversations: [],
         messages: [],
         friends: [],
+        pendingIncoming: [],
+        pendingOutgoing: [],
+        blockedUsers: [],
+        friendsSearchQuery: '',
+        friendsSearchResults: [],
         groups: [],
         currentUser: null,
         currentProfile: null,
@@ -101,6 +108,7 @@ export const AppView = {
                     <button type="button" class="nav-pill-btn ${this.state.activeTab === 'friends' ? 'active' : ''}" data-tab="friends">
                         <span>👥</span>
                         <span>Friends</span>
+                        <span class="nav-pill-badge badge-danger" id="badge-friends" style="display: none;">0</span>
                     </button>
                     <button type="button" class="nav-pill-btn ${this.state.activeTab === 'groups' ? 'active' : ''}" data-tab="groups">
                         <span>👥</span>
@@ -277,6 +285,7 @@ export const AppView = {
                 <a href="#/app" class="bottom-nav-item" data-tab="friends">
                     <span class="bottom-nav-icon">👥</span>
                     <span>Friends</span>
+                    <span class="bottom-nav-badge" id="bottom-badge-friends" style="display: none;"></span>
                 </a>
                 <a href="#/app" class="bottom-nav-item" data-tab="groups">
                     <span class="bottom-nav-icon">👥</span>
@@ -299,6 +308,7 @@ export const AppView = {
 
         this.bindEvents(container);
         this.loadConversations(container);
+        this.refreshSocialState(container);
         this.setupRealtimeListeners(container);
 
         return container;
@@ -690,49 +700,7 @@ export const AppView = {
         if (this.state.activeTab === 'chats') {
             this.renderConversationsList(root);
         } else if (this.state.activeTab === 'friends') {
-            title.textContent = 'Friends';
-            list.innerHTML = `<div class="empty-state-box"><span class="spinner" style="border-top-color: var(--accent);"></span></div>`;
-            const friends = await chatService.getFriends();
-            if (friends.length === 0) {
-                list.innerHTML = `
-                    <div class="empty-state-box">
-                        <div class="empty-state-icon">👥</div>
-                        <h3 class="empty-state-title">No friends added yet</h3>
-                        <p class="empty-state-desc">Search for users by username to send friend requests.</p>
-                        <button type="button" id="btn-find-friends-action" class="btn-primary" style="font-size: 0.85rem; max-width: 180px;">Find Users</button>
-                    </div>
-                `;
-                list.querySelector('#btn-find-friends-action')?.addEventListener('click', () => {
-                    this.showNewChatModal(root);
-                });
-            } else {
-                list.innerHTML = '';
-                friends.forEach(f => {
-                    const item = document.createElement('div');
-                    item.className = 'chat-item';
-                    item.innerHTML = `
-                        <div class="avatar-wrapper">
-                            ${f.avatarUrl ? `<img src="${f.avatarUrl}" alt="${f.displayName}" />` : `<span>${f.displayName.charAt(0).toUpperCase()}</span>`}
-                            ${f.isOnline ? `<div class="online-indicator"></div>` : ''}
-                        </div>
-                        <div class="chat-item-content">
-                            <div class="chat-item-name">${f.displayName}</div>
-                            <div class="chat-item-lastmsg">@${f.username}</div>
-                        </div>
-                        <button type="button" class="btn-primary btn-chat-now" style="min-height: 32px; padding: 0.25rem 0.75rem; font-size: 0.75rem;">Message</button>
-                    `;
-                    item.querySelector('.btn-chat-now').addEventListener('click', async (e) => {
-                        e.stopPropagation();
-                        const res = await chatService.createDirectConversation(f.id);
-                        if (res.success) {
-                            await this.loadConversations(root);
-                            const target = this.state.conversations.find(c => c.id === res.conversationId);
-                            if (target) this.selectConversation(root, target);
-                        }
-                    });
-                    list.appendChild(item);
-                });
-            }
+            await this.renderFriendsTab(root);
         } else if (this.state.activeTab === 'groups') {
             title.textContent = 'Groups';
             list.innerHTML = `
@@ -1071,6 +1039,7 @@ export const AppView = {
 
     /**
      * Start New Chat / Search User Modal
+     * Enforces: Direct messages require mutual friendship.
      */
     showNewChatModal(root) {
         const modal = root.querySelector('#modal-container');
@@ -1084,13 +1053,17 @@ export const AppView = {
                     <button type="button" id="btn-close-modal" class="btn-icon" aria-label="Close modal">✕</button>
                 </div>
                 <div class="modal-dialog-body">
-                    <div class="form-group" style="margin-bottom: 1rem;">
-                        <label class="form-label">Find User by Username</label>
-                        <input type="text" id="modal-search-user" class="form-input" placeholder="Search @username..." autofocus />
+                    <div class="form-group" style="margin-bottom: 0.75rem;">
+                        <label class="form-label">Find User by @username or Name</label>
+                        <input type="text" id="modal-search-user" class="form-input" placeholder="Search @username or name..." autofocus />
                     </div>
-                    <div id="modal-user-results" style="max-height: 240px; overflow-y: auto; display: flex; flex-direction: column; gap: 0.5rem;">
+                    <div style="font-size: 0.75rem; color: var(--text-muted); margin-bottom: 0.75rem; display: flex; align-items: center; gap: 0.35rem;">
+                        <span>🔒</span>
+                        <span>Direct messaging strictly requires an accepted mutual friendship.</span>
+                    </div>
+                    <div id="modal-user-results" style="max-height: 280px; overflow-y: auto; display: flex; flex-direction: column; gap: 0.5rem;">
                         <div style="color: var(--text-muted); font-size: 0.85rem; text-align: center; padding: 1.5rem 0;">
-                            Type at least 2 characters to search
+                            Type at least 1 character to search
                         </div>
                     </div>
                 </div>
@@ -1109,39 +1082,716 @@ export const AppView = {
             clearTimeout(timer);
             timer = setTimeout(async () => {
                 const query = input.value.trim();
-                if (query.length < 2) return;
+                if (!query) {
+                    results.innerHTML = `<div style="color: var(--text-muted); font-size: 0.85rem; text-align: center; padding: 1.5rem 0;">Type at least 1 character to search</div>`;
+                    return;
+                }
                 results.innerHTML = `<span class="spinner" style="border-top-color: var(--accent); margin: 1rem auto;"></span>`;
-                const users = await chatService.searchUsers(query);
+                const users = await friendService.searchUsers(query);
                 if (users.length === 0) {
-                    results.innerHTML = `<div style="text-align: center; color: var(--text-muted); padding: 1rem 0;">No users found</div>`;
+                    results.innerHTML = `<div style="text-align: center; color: var(--text-muted); padding: 1rem 0;">No users found matching "${this.escapeHtml(query)}"</div>`;
                     return;
                 }
                 results.innerHTML = '';
                 users.forEach(u => {
                     const row = document.createElement('div');
-                    row.className = 'chat-item';
+                    row.className = 'friend-item-row';
+                    row.style.padding = '0.5rem 0';
                     row.innerHTML = `
-                        <div class="avatar-wrapper">
-                            ${u.avatar_url ? `<img src="${u.avatar_url}" alt="${u.display_name}" />` : `<span>${u.display_name.charAt(0).toUpperCase()}</span>`}
+                        <div class="friend-item-avatar-col">
+                            <div class="avatar-wrapper">
+                                ${u.avatar_url ? `<img src="${u.avatar_url}" alt="${this.escapeHtml(u.display_name)}" />` : `<span>${u.display_name.charAt(0).toUpperCase()}</span>`}
+                            </div>
                         </div>
-                        <div class="chat-item-content">
-                            <div class="chat-item-name">${u.display_name}</div>
-                            <div class="chat-item-lastmsg">@${u.username}</div>
+                        <div class="friend-item-info">
+                            <div class="friend-item-name">${this.escapeHtml(u.display_name)}</div>
+                            <div class="friend-item-handle">@${this.escapeHtml(u.username)}</div>
                         </div>
+                        <div class="friend-item-actions" id="user-actions-${u.id}"></div>
                     `;
-                    row.addEventListener('click', async () => {
-                        modal.style.display = 'none';
-                        const res = await chatService.createDirectConversation(u.id);
-                        if (res.success) {
-                            await this.loadConversations(root);
-                            const target = this.state.conversations.find(c => c.id === res.conversationId);
-                            if (target) this.selectConversation(root, target);
-                        }
-                    });
+
+                    const actionsCol = row.querySelector(`#user-actions-${u.id}`);
+
+                    if (u.is_friend) {
+                        actionsCol.innerHTML = `<button type="button" class="btn-friend-action btn-friend-primary btn-chat-action">💬 Chat</button>`;
+                        actionsCol.querySelector('.btn-chat-action').addEventListener('click', async () => {
+                            modal.style.display = 'none';
+                            const res = await chatService.createDirectConversation(u.id);
+                            if (res.success) {
+                                await this.loadConversations(root);
+                                const target = this.state.conversations.find(c => c.id === res.conversationId);
+                                if (target) {
+                                    this.switchTab(root, 'chats');
+                                    this.selectConversation(root, target);
+                                }
+                            } else {
+                                alert(res.error || 'Could not start conversation.');
+                            }
+                        });
+                    } else if (u.request_status === 'pending_outgoing') {
+                        actionsCol.innerHTML = `<span class="btn-friend-action btn-friend-muted">Request Sent</span>`;
+                    } else if (u.request_status === 'pending_incoming') {
+                        actionsCol.innerHTML = `<button type="button" class="btn-friend-action btn-friend-primary btn-accept-action">Accept</button>`;
+                        actionsCol.querySelector('.btn-accept-action').addEventListener('click', async () => {
+                            const res = await friendService.acceptFriendRequest(u.request_id);
+                            if (res.success) {
+                                actionsCol.innerHTML = `<button type="button" class="btn-friend-action btn-friend-primary btn-chat-action">💬 Chat</button>`;
+                                await this.refreshSocialState(root);
+                            }
+                        });
+                    } else if (u.is_blocked_by_me) {
+                        actionsCol.innerHTML = `<span class="btn-friend-action btn-friend-danger">Blocked</span>`;
+                    } else {
+                        actionsCol.innerHTML = `<button type="button" class="btn-friend-action btn-friend-primary btn-add-friend-action">+ Add Friend</button>`;
+                        actionsCol.querySelector('.btn-add-friend-action').addEventListener('click', async (e) => {
+                            e.target.disabled = true;
+                            e.target.textContent = 'Sending...';
+                            const res = await friendService.sendFriendRequest(u.id);
+                            if (res.success) {
+                                if (res.status === 'accepted') {
+                                    actionsCol.innerHTML = `<button type="button" class="btn-friend-action btn-friend-primary btn-chat-action">💬 Chat</button>`;
+                                } else {
+                                    actionsCol.innerHTML = `<span class="btn-friend-action btn-friend-muted">Request Sent</span>`;
+                                }
+                                await this.refreshSocialState(root);
+                            } else {
+                                e.target.disabled = false;
+                                e.target.textContent = '+ Add Friend';
+                                alert(res.error || 'Could not send friend request.');
+                            }
+                        });
+                    }
+
                     results.appendChild(row);
                 });
             }, 300);
         });
+    },
+
+    /**
+     * Render Social & Friends Tab with Sub-Navigation
+     */
+    async renderFriendsTab(root) {
+        const list = root.querySelector('#sidebar-list-content');
+        const title = root.querySelector('#sidebar-section-title');
+        title.textContent = 'Social & Friends';
+
+        list.innerHTML = `<div class="empty-state-box"><span class="spinner" style="border-top-color: var(--accent);"></span></div>`;
+
+        // Refresh overview data
+        const overview = await friendService.getSocialOverview();
+        this.state.friends = overview.friends || [];
+        this.state.pendingIncoming = overview.pending_incoming || [];
+        this.state.pendingOutgoing = overview.pending_outgoing || [];
+        this.state.blockedUsers = overview.blocked || [];
+
+        this.updateFriendsBadges(root);
+
+        const subTab = this.state.activeFriendsSubTab || 'all';
+
+        // Render sub-navigation bar
+        list.innerHTML = `
+            <div class="friends-nav-bar" id="friends-nav-bar">
+                <button type="button" class="friends-subtab-pill ${subTab === 'all' ? 'active' : ''}" data-subtab="all">
+                    <span>Friends</span>
+                    <span class="friends-pill-badge">${this.state.friends.length}</span>
+                </button>
+                <button type="button" class="friends-subtab-pill ${subTab === 'incoming' ? 'active' : ''}" data-subtab="incoming">
+                    <span>Requests</span>
+                    <span class="friends-pill-badge ${this.state.pendingIncoming.length > 0 ? 'badge-alert' : ''}">${this.state.pendingIncoming.length}</span>
+                </button>
+                <button type="button" class="friends-subtab-pill ${subTab === 'outgoing' ? 'active' : ''}" data-subtab="outgoing">
+                    <span>Sent</span>
+                    <span class="friends-pill-badge">${this.state.pendingOutgoing.length}</span>
+                </button>
+                <button type="button" class="friends-subtab-pill ${subTab === 'search' ? 'active' : ''}" data-subtab="search">
+                    <span>🔍 Find</span>
+                </button>
+                <button type="button" class="friends-subtab-pill ${subTab === 'blocked' ? 'active' : ''}" data-subtab="blocked">
+                    <span>Blocked</span>
+                    <span class="friends-pill-badge">${this.state.blockedUsers.length}</span>
+                </button>
+            </div>
+            <div id="friends-tab-body" style="display: flex; flex-direction: column;"></div>
+        `;
+
+        // Bind subtab pills
+        list.querySelectorAll('.friends-subtab-pill').forEach(btn => {
+            btn.addEventListener('click', () => {
+                this.state.activeFriendsSubTab = btn.dataset.subtab;
+                this.renderFriendsTab(root);
+            });
+        });
+
+        const body = list.querySelector('#friends-tab-body');
+
+        if (subTab === 'all') {
+            this.renderAllFriendsSubTab(root, body);
+        } else if (subTab === 'incoming') {
+            this.renderIncomingRequestsSubTab(root, body);
+        } else if (subTab === 'outgoing') {
+            this.renderOutgoingRequestsSubTab(root, body);
+        } else if (subTab === 'search') {
+            this.renderSearchUsersSubTab(root, body);
+        } else if (subTab === 'blocked') {
+            this.renderBlockedUsersSubTab(root, body);
+        }
+    },
+
+    /**
+     * Render "All Friends" sub-tab
+     */
+    renderAllFriendsSubTab(root, container) {
+        if (this.state.friends.length === 0) {
+            container.innerHTML = `
+                <div class="empty-state-box">
+                    <div class="empty-state-icon">👥</div>
+                    <h3 class="empty-state-title">No friends yet</h3>
+                    <p class="empty-state-desc">Connect with people by searching their @username to chat freely.</p>
+                    <button type="button" id="btn-find-friends-now" class="btn-primary" style="font-size: 0.85rem; max-width: 180px;">Find Users</button>
+                </div>
+            `;
+            container.querySelector('#btn-find-friends-now')?.addEventListener('click', () => {
+                this.state.activeFriendsSubTab = 'search';
+                this.renderFriendsTab(root);
+            });
+            return;
+        }
+
+        container.innerHTML = '';
+        this.state.friends.forEach(f => {
+            const row = document.createElement('div');
+            row.className = 'friend-item-row';
+            row.innerHTML = `
+                <div class="friend-item-avatar-col">
+                    <div class="avatar-wrapper">
+                        ${f.avatar_url ? `<img src="${f.avatar_url}" alt="${this.escapeHtml(f.display_name)}" />` : `<span>${f.display_name.charAt(0).toUpperCase()}</span>`}
+                        ${f.is_online ? `<div class="online-indicator"></div>` : ''}
+                    </div>
+                </div>
+                <div class="friend-item-info">
+                    <div class="friend-item-name">${this.escapeHtml(f.display_name)}</div>
+                    <div class="friend-item-handle">@${this.escapeHtml(f.username)}</div>
+                    ${f.bio ? `<div class="friend-item-bio">${this.escapeHtml(f.bio)}</div>` : ''}
+                </div>
+                <div class="friend-item-actions">
+                    <button type="button" class="btn-friend-action btn-friend-primary btn-message-friend" title="Message">💬 Message</button>
+                    <button type="button" class="btn-friend-action btn-friend-secondary btn-friend-menu" title="Options">⋯</button>
+                </div>
+            `;
+
+            row.querySelector('.btn-message-friend').addEventListener('click', async (e) => {
+                e.stopPropagation();
+                const res = await chatService.createDirectConversation(f.id);
+                if (res.success) {
+                    await this.loadConversations(root);
+                    const target = this.state.conversations.find(c => c.id === res.conversationId);
+                    if (target) {
+                        this.switchTab(root, 'chats');
+                        this.selectConversation(root, target);
+                    }
+                } else {
+                    alert(res.error || 'Could not start conversation.');
+                }
+            });
+
+            row.querySelector('.btn-friend-menu').addEventListener('click', (e) => {
+                e.stopPropagation();
+                this.showFriendOptionsModal(root, f);
+            });
+
+            container.appendChild(row);
+        });
+    },
+
+    /**
+     * Render "Incoming Requests" sub-tab
+     */
+    renderIncomingRequestsSubTab(root, container) {
+        if (this.state.pendingIncoming.length === 0) {
+            container.innerHTML = `
+                <div class="empty-state-box">
+                    <div class="empty-state-icon">📥</div>
+                    <h3 class="empty-state-title">No pending requests</h3>
+                    <p class="empty-state-desc">You have no incoming friend requests right now.</p>
+                </div>
+            `;
+            return;
+        }
+
+        container.innerHTML = '';
+        this.state.pendingIncoming.forEach(r => {
+            const row = document.createElement('div');
+            row.className = 'friend-item-row';
+            row.innerHTML = `
+                <div class="friend-item-avatar-col">
+                    <div class="avatar-wrapper">
+                        ${r.avatar_url ? `<img src="${r.avatar_url}" alt="${this.escapeHtml(r.display_name)}" />` : `<span>${r.display_name.charAt(0).toUpperCase()}</span>`}
+                    </div>
+                </div>
+                <div class="friend-item-info">
+                    <div class="friend-item-name">${this.escapeHtml(r.display_name)}</div>
+                    <div class="friend-item-handle">@${this.escapeHtml(r.username)}</div>
+                    <div class="friend-item-time">${this.formatTimeAgo(r.created_at)}</div>
+                </div>
+                <div class="friend-item-actions">
+                    <button type="button" class="btn-friend-action btn-friend-primary btn-accept-req">Accept</button>
+                    <button type="button" class="btn-friend-action btn-friend-danger btn-reject-req">Decline</button>
+                </div>
+            `;
+
+            row.querySelector('.btn-accept-req').addEventListener('click', async (e) => {
+                e.target.disabled = true;
+                const res = await friendService.acceptFriendRequest(r.request_id);
+                if (res.success) {
+                    await this.refreshSocialState(root);
+                } else {
+                    e.target.disabled = false;
+                    alert(res.error || 'Could not accept friend request.');
+                }
+            });
+
+            row.querySelector('.btn-reject-req').addEventListener('click', async (e) => {
+                e.target.disabled = true;
+                const res = await friendService.rejectFriendRequest(r.request_id);
+                if (res.success) {
+                    await this.refreshSocialState(root);
+                } else {
+                    e.target.disabled = false;
+                    alert(res.error || 'Could not decline friend request.');
+                }
+            });
+
+            container.appendChild(row);
+        });
+    },
+
+    /**
+     * Render "Outgoing Requests" sub-tab
+     */
+    renderOutgoingRequestsSubTab(root, container) {
+        if (this.state.pendingOutgoing.length === 0) {
+            container.innerHTML = `
+                <div class="empty-state-box">
+                    <div class="empty-state-icon">📤</div>
+                    <h3 class="empty-state-title">No sent requests</h3>
+                    <p class="empty-state-desc">You do not have any pending outgoing requests.</p>
+                </div>
+            `;
+            return;
+        }
+
+        container.innerHTML = '';
+        this.state.pendingOutgoing.forEach(r => {
+            const row = document.createElement('div');
+            row.className = 'friend-item-row';
+            row.innerHTML = `
+                <div class="friend-item-avatar-col">
+                    <div class="avatar-wrapper">
+                        ${r.avatar_url ? `<img src="${r.avatar_url}" alt="${this.escapeHtml(r.display_name)}" />` : `<span>${r.display_name.charAt(0).toUpperCase()}</span>`}
+                    </div>
+                </div>
+                <div class="friend-item-info">
+                    <div class="friend-item-name">${this.escapeHtml(r.display_name)}</div>
+                    <div class="friend-item-handle">@${this.escapeHtml(r.username)}</div>
+                    <div class="friend-item-time">Awaiting response · ${this.formatTimeAgo(r.created_at)}</div>
+                </div>
+                <div class="friend-item-actions">
+                    <button type="button" class="btn-friend-action btn-friend-secondary btn-cancel-req">Cancel</button>
+                </div>
+            `;
+
+            row.querySelector('.btn-cancel-req').addEventListener('click', async (e) => {
+                e.target.disabled = true;
+                const res = await friendService.cancelFriendRequest(r.request_id);
+                if (res.success) {
+                    await this.refreshSocialState(root);
+                } else {
+                    e.target.disabled = false;
+                    alert(res.error || 'Could not cancel friend request.');
+                }
+            });
+
+            container.appendChild(row);
+        });
+    },
+
+    /**
+     * Render "Find Users" live social search sub-tab
+     */
+    renderSearchUsersSubTab(root, container) {
+        container.innerHTML = `
+            <div class="friends-search-header-box">
+                <input 
+                    type="text" 
+                    id="friends-social-search-input" 
+                    class="friends-search-input" 
+                    placeholder="Search by @username or name..." 
+                    value="${this.escapeHtml(this.state.friendsSearchQuery || '')}" 
+                    autofocus 
+                />
+            </div>
+            <div id="friends-social-results" style="display: flex; flex-direction: column;">
+                <div style="color: var(--text-muted); font-size: 0.85rem; text-align: center; padding: 2rem 1rem;">
+                    Type a username (e.g. @alex) or display name to find users.
+                </div>
+            </div>
+        `;
+
+        const input = container.querySelector('#friends-social-search-input');
+        const resultsBox = container.querySelector('#friends-social-results');
+
+        let timer = null;
+        const executeSearch = () => {
+            clearTimeout(timer);
+            timer = setTimeout(async () => {
+                const query = input.value.trim();
+                this.state.friendsSearchQuery = query;
+                if (!query) {
+                    resultsBox.innerHTML = `
+                        <div style="color: var(--text-muted); font-size: 0.85rem; text-align: center; padding: 2rem 1rem;">
+                            Type a username or display name to find users.
+                        </div>
+                    `;
+                    return;
+                }
+
+                resultsBox.innerHTML = `<span class="spinner" style="border-top-color: var(--accent); margin: 1.5rem auto;"></span>`;
+                const users = await friendService.searchUsers(query);
+                if (users.length === 0) {
+                    resultsBox.innerHTML = `
+                        <div style="color: var(--text-muted); font-size: 0.85rem; text-align: center; padding: 2rem 1rem;">
+                            No users found matching "${this.escapeHtml(query)}"
+                        </div>
+                    `;
+                    return;
+                }
+
+                resultsBox.innerHTML = '';
+                users.forEach(u => {
+                    const row = document.createElement('div');
+                    row.className = 'friend-item-row';
+                    row.innerHTML = `
+                        <div class="friend-item-avatar-col">
+                            <div class="avatar-wrapper">
+                                ${u.avatar_url ? `<img src="${u.avatar_url}" alt="${this.escapeHtml(u.display_name)}" />` : `<span>${u.display_name.charAt(0).toUpperCase()}</span>`}
+                            </div>
+                        </div>
+                        <div class="friend-item-info">
+                            <div class="friend-item-name">${this.escapeHtml(u.display_name)}</div>
+                            <div class="friend-item-handle">@${this.escapeHtml(u.username)}</div>
+                            ${u.bio ? `<div class="friend-item-bio">${this.escapeHtml(u.bio)}</div>` : ''}
+                        </div>
+                        <div class="friend-item-actions" id="search-action-${u.id}"></div>
+                    `;
+
+                    const act = row.querySelector(`#search-action-${u.id}`);
+
+                    if (u.is_friend) {
+                        act.innerHTML = `
+                            <button type="button" class="btn-friend-action btn-friend-primary btn-search-msg">💬 Message</button>
+                        `;
+                        act.querySelector('.btn-search-msg').addEventListener('click', async () => {
+                            const res = await chatService.createDirectConversation(u.id);
+                            if (res.success) {
+                                await this.loadConversations(root);
+                                const target = this.state.conversations.find(c => c.id === res.conversationId);
+                                if (target) {
+                                    this.switchTab(root, 'chats');
+                                    this.selectConversation(root, target);
+                                }
+                            }
+                        });
+                    } else if (u.request_status === 'pending_outgoing') {
+                        act.innerHTML = `
+                            <button type="button" class="btn-friend-action btn-friend-secondary btn-search-cancel">Cancel</button>
+                        `;
+                        act.querySelector('.btn-search-cancel').addEventListener('click', async (e) => {
+                            e.target.disabled = true;
+                            const res = await friendService.cancelFriendRequest(u.request_id);
+                            if (res.success) {
+                                executeSearch();
+                                await this.refreshSocialState(root);
+                            }
+                        });
+                    } else if (u.request_status === 'pending_incoming') {
+                        act.innerHTML = `
+                            <button type="button" class="btn-friend-action btn-friend-primary btn-search-accept">Accept</button>
+                        `;
+                        act.querySelector('.btn-search-accept').addEventListener('click', async (e) => {
+                            e.target.disabled = true;
+                            const res = await friendService.acceptFriendRequest(u.request_id);
+                            if (res.success) {
+                                executeSearch();
+                                await this.refreshSocialState(root);
+                            }
+                        });
+                    } else if (u.is_blocked_by_me) {
+                        act.innerHTML = `
+                            <button type="button" class="btn-friend-action btn-friend-secondary btn-search-unblock">Unblock</button>
+                        `;
+                        act.querySelector('.btn-search-unblock').addEventListener('click', async (e) => {
+                            e.target.disabled = true;
+                            const res = await friendService.unblockUser(u.id);
+                            if (res.success) {
+                                executeSearch();
+                                await this.refreshSocialState(root);
+                            }
+                        });
+                    } else {
+                        act.innerHTML = `
+                            <button type="button" class="btn-friend-action btn-friend-primary btn-search-add">+ Add Friend</button>
+                        `;
+                        act.querySelector('.btn-search-add').addEventListener('click', async (e) => {
+                            e.target.disabled = true;
+                            e.target.textContent = 'Sending...';
+                            const res = await friendService.sendFriendRequest(u.id);
+                            if (res.success) {
+                                executeSearch();
+                                await this.refreshSocialState(root);
+                            } else {
+                                e.target.disabled = false;
+                                e.target.textContent = '+ Add Friend';
+                                alert(res.error || 'Could not send friend request.');
+                            }
+                        });
+                    }
+
+                    resultsBox.appendChild(row);
+                });
+            }, 300);
+        };
+
+        input.addEventListener('input', executeSearch);
+
+        // If there was an existing query, trigger search
+        if (this.state.friendsSearchQuery) {
+            executeSearch();
+        }
+    },
+
+    /**
+     * Render "Blocked Users" sub-tab
+     */
+    renderBlockedUsersSubTab(root, container) {
+        if (this.state.blockedUsers.length === 0) {
+            container.innerHTML = `
+                <div class="empty-state-box">
+                    <div class="empty-state-icon">🛡️</div>
+                    <h3 class="empty-state-title">No blocked users</h3>
+                    <p class="empty-state-desc">You have not blocked anyone.</p>
+                </div>
+            `;
+            return;
+        }
+
+        container.innerHTML = '';
+        this.state.blockedUsers.forEach(b => {
+            const row = document.createElement('div');
+            row.className = 'friend-item-row';
+            row.innerHTML = `
+                <div class="friend-item-avatar-col">
+                    <div class="avatar-wrapper">
+                        ${b.avatar_url ? `<img src="${b.avatar_url}" alt="${this.escapeHtml(b.display_name)}" />` : `<span>${b.display_name.charAt(0).toUpperCase()}</span>`}
+                    </div>
+                </div>
+                <div class="friend-item-info">
+                    <div class="friend-item-name">${this.escapeHtml(b.display_name)}</div>
+                    <div class="friend-item-handle">@${this.escapeHtml(b.username)}</div>
+                    <div class="friend-item-time">Blocked · All messaging prohibited</div>
+                </div>
+                <div class="friend-item-actions">
+                    <button type="button" class="btn-friend-action btn-friend-secondary btn-unblock-action">Unblock</button>
+                </div>
+            `;
+
+            row.querySelector('.btn-unblock-action').addEventListener('click', () => {
+                this.showConfirmModal(root, {
+                    title: 'Unblock User',
+                    message: `Unblock @${b.username}? They will be able to send you friend requests again.`,
+                    confirmText: 'Unblock',
+                    confirmDanger: false,
+                    onConfirm: async () => {
+                        const res = await friendService.unblockUser(b.blocked_id);
+                        if (res.success) {
+                            await this.refreshSocialState(root);
+                        } else {
+                            alert(res.error || 'Could not unblock user.');
+                        }
+                    }
+                });
+            });
+
+            container.appendChild(row);
+        });
+    },
+
+    /**
+     * Options modal for a friend (Message, Remove, Block)
+     */
+    showFriendOptionsModal(root, friend) {
+        const modal = root.querySelector('#modal-container');
+        modal.style.display = 'flex';
+        modal.className = 'modal-overlay';
+        modal.innerHTML = `
+            <div class="modal-dialog" style="max-width: 360px;">
+                <div class="modal-dialog-header">
+                    <h3 class="modal-dialog-title">${this.escapeHtml(friend.display_name)}</h3>
+                    <button type="button" id="btn-close-friend-opts" class="btn-icon" aria-label="Close">✕</button>
+                </div>
+                <div class="modal-dialog-body" style="display: flex; flex-direction: column; gap: 0.75rem;">
+                    <div style="font-size: 0.825rem; color: var(--text-muted); text-align: center; margin-bottom: 0.5rem;">
+                        @${this.escapeHtml(friend.username)}
+                    </div>
+                    <button type="button" id="btn-opt-message" class="btn-primary" style="min-height: 38px;">💬 Message</button>
+                    <button type="button" id="btn-opt-remove" class="btn-secondary" style="min-height: 38px; color: var(--danger); border-color: rgba(239,68,68,0.3);">✕ Remove Friend</button>
+                    <button type="button" id="btn-opt-block" class="btn-secondary" style="min-height: 38px; color: var(--danger); border-color: rgba(239,68,68,0.3);">🚫 Block User</button>
+                </div>
+            </div>
+        `;
+
+        const close = () => { modal.style.display = 'none'; };
+        modal.querySelector('#btn-close-friend-opts').addEventListener('click', close);
+
+        modal.querySelector('#btn-opt-message').addEventListener('click', async () => {
+            close();
+            const res = await chatService.createDirectConversation(friend.id);
+            if (res.success) {
+                await this.loadConversations(root);
+                const target = this.state.conversations.find(c => c.id === res.conversationId);
+                if (target) {
+                    this.switchTab(root, 'chats');
+                    this.selectConversation(root, target);
+                }
+            } else {
+                alert(res.error || 'Could not start conversation.');
+            }
+        });
+
+        modal.querySelector('#btn-opt-remove').addEventListener('click', () => {
+            close();
+            this.showConfirmModal(root, {
+                title: 'Remove Friend',
+                message: `Are you sure you want to remove @${friend.username} from your friends? Mutual messaging will be disabled until a new friend request is accepted.`,
+                confirmText: 'Remove',
+                confirmDanger: true,
+                onConfirm: async () => {
+                    const res = await friendService.removeFriend(friend.id);
+                    if (res.success) {
+                        await this.refreshSocialState(root);
+                    } else {
+                        alert(res.error || 'Failed to remove friend.');
+                    }
+                }
+            });
+        });
+
+        modal.querySelector('#btn-opt-block').addEventListener('click', () => {
+            close();
+            this.showConfirmModal(root, {
+                title: 'Block User',
+                message: `Are you sure you want to block @${friend.username}? All messaging permissions will be permanently severed, and they will not be able to find your profile.`,
+                confirmText: 'Block User',
+                confirmDanger: true,
+                onConfirm: async () => {
+                    const res = await friendService.blockUser(friend.id);
+                    if (res.success) {
+                        await this.refreshSocialState(root);
+                    } else {
+                        alert(res.error || 'Failed to block user.');
+                    }
+                }
+            });
+        });
+    },
+
+    /**
+     * Confirmation Modal Dialog
+     */
+    showConfirmModal(root, { title, message, confirmText = 'Confirm', confirmDanger = false, onConfirm }) {
+        const modal = root.querySelector('#modal-container');
+        modal.style.display = 'flex';
+        modal.className = 'modal-overlay';
+        modal.innerHTML = `
+            <div class="modal-dialog">
+                <div class="modal-dialog-header">
+                    <h3 class="modal-dialog-title">${this.escapeHtml(title)}</h3>
+                    <button type="button" id="btn-close-confirm-modal" class="btn-icon" aria-label="Close">✕</button>
+                </div>
+                <div class="modal-dialog-body" style="display: flex; flex-direction: column; gap: 1rem;">
+                    <p style="font-size: 0.9rem; color: var(--text-secondary); line-height: 1.5;">${this.escapeHtml(message)}</p>
+                    <div style="display: flex; justify-content: flex-end; gap: 0.5rem; margin-top: 0.5rem;">
+                        <button type="button" id="btn-cancel-confirm" class="btn-friend-action btn-friend-secondary">Cancel</button>
+                        <button type="button" id="btn-action-confirm" class="btn-friend-action ${confirmDanger ? 'btn-friend-danger' : 'btn-friend-primary'}">${this.escapeHtml(confirmText)}</button>
+                    </div>
+                </div>
+            </div>
+        `;
+
+        const close = () => { modal.style.display = 'none'; };
+        modal.querySelector('#btn-close-confirm-modal').addEventListener('click', close);
+        modal.querySelector('#btn-cancel-confirm').addEventListener('click', close);
+        modal.querySelector('#btn-action-confirm').addEventListener('click', async () => {
+            close();
+            if (typeof onConfirm === 'function') await onConfirm();
+        });
+    },
+
+    /**
+     * Update navigation badges for incoming friend requests
+     */
+    updateFriendsBadges(root) {
+        const incomingCount = this.state.pendingIncoming ? this.state.pendingIncoming.length : 0;
+        const friendsCount = this.state.friends ? this.state.friends.length : 0;
+
+        const badgeEl = root.querySelector('#badge-friends');
+        if (badgeEl) {
+            badgeEl.textContent = String(incomingCount);
+            badgeEl.style.display = incomingCount > 0 ? 'inline-block' : 'none';
+        }
+
+        const bottomBadgeEl = root.querySelector('#bottom-badge-friends');
+        if (bottomBadgeEl) {
+            bottomBadgeEl.textContent = String(incomingCount);
+            bottomBadgeEl.style.display = incomingCount > 0 ? 'inline-block' : 'none';
+        }
+
+        this.state.stats.friendsCount = friendsCount;
+        const infoFriendsStat = root.querySelector('#info-stat-friends');
+        if (infoFriendsStat && !this.state.activeConversation?.peerUsername) {
+            infoFriendsStat.textContent = String(friendsCount);
+        }
+    },
+
+    /**
+     * Refresh social overview state from database
+     */
+    async refreshSocialState(root) {
+        const overview = await friendService.getSocialOverview();
+        this.state.friends = overview.friends || [];
+        this.state.pendingIncoming = overview.pending_incoming || [];
+        this.state.pendingOutgoing = overview.pending_outgoing || [];
+        this.state.blockedUsers = overview.blocked || [];
+        this.updateFriendsBadges(root);
+        if (this.state.activeTab === 'friends') {
+            this.renderFriendsTab(root);
+        }
+    },
+
+    /**
+     * Format time ago relative string
+     */
+    formatTimeAgo(isoString) {
+        if (!isoString) return '';
+        const diffSecs = Math.floor((Date.now() - new Date(isoString).getTime()) / 1000);
+        if (diffSecs < 60) return 'Just now';
+        const mins = Math.floor(diffSecs / 60);
+        if (mins < 60) return `${mins}m ago`;
+        const hours = Math.floor(mins / 60);
+        if (hours < 24) return `${hours}h ago`;
+        const days = Math.floor(hours / 24);
+        if (days < 30) return `${days}d ago`;
+        return new Date(isoString).toLocaleDateString();
     },
 
     /**
@@ -1572,7 +2222,7 @@ export const AppView = {
     },
 
     /**
-     * Setup Realtime WSS listeners for live chat
+     * Setup Realtime WSS listeners for live chat & social updates
      */
     setupRealtimeListeners(root) {
         this.unsubscribeRealtime = realtimeService.subscribeToMessages((newMsg) => {
@@ -1583,10 +2233,31 @@ export const AppView = {
             // Update conversation list preview
             this.loadConversations(root);
         });
+
+        // Realtime social relationship updates
+        try {
+            const user = this.state.currentUser;
+            if (user && supabase && typeof supabase.channel === 'function') {
+                this.socialChannel = supabase
+                    .channel('social_realtime_updates')
+                    .on('postgres_changes', { event: '*', schema: 'public', table: 'friend_requests' }, () => {
+                        this.refreshSocialState(root);
+                    })
+                    .on('postgres_changes', { event: '*', schema: 'public', table: 'friendships' }, () => {
+                        this.refreshSocialState(root);
+                    })
+                    .on('postgres_changes', { event: '*', schema: 'public', table: 'blocked_users' }, () => {
+                        this.refreshSocialState(root);
+                    })
+                    .subscribe();
+            }
+        } catch (err) {
+            console.warn('[AppView] Social realtime listener error:', err);
+        }
     },
 
     filterSidebarItems(root, query) {
-        const items = root.querySelectorAll('.chat-item');
+        const items = root.querySelectorAll('.chat-item, .friend-item-row');
         items.forEach(it => {
             const text = it.textContent.toLowerCase();
             it.style.display = text.includes(query) ? 'flex' : 'none';
@@ -1605,6 +2276,9 @@ export const AppView = {
         }
         if (this.unsubscribeRealtime) {
             this.unsubscribeRealtime();
+        }
+        if (this.socialChannel && typeof this.socialChannel.unsubscribe === 'function') {
+            this.socialChannel.unsubscribe();
         }
         realtimeService.cleanup();
     }

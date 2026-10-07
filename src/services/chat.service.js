@@ -208,6 +208,69 @@ class ChatService {
         if (user.id === targetUserId) return { success: false, error: 'Cannot chat with yourself.' };
 
         try {
+            // Rule 1: A user cannot message another user before friendship is accepted
+            let isFriend = false;
+            try {
+                const { data, error } = await supabase.rpc('are_friends', { 
+                    user_a: user.id, 
+                    user_b: targetUserId 
+                });
+                if (!error && typeof data === 'boolean') {
+                    isFriend = data;
+                }
+            } catch (rpcErr) {
+                // Ignore and fall back to table
+            }
+
+            if (!isFriend) {
+                const { data: fRow } = await supabase
+                    .from('friendships')
+                    .select('id')
+                    .eq('user_id', user.id)
+                    .eq('friend_id', targetUserId)
+                    .maybeSingle();
+                isFriend = !!fRow;
+            }
+
+            if (!isFriend) {
+                return { 
+                    success: false, 
+                    error: 'You cannot message this user before your friend request is accepted.' 
+                };
+            }
+
+            // Rule 2: Block rules override messaging permissions
+            let isBlocked = false;
+            try {
+                const { data: blockedMe } = await supabase.rpc('is_blocked_by', { 
+                    target_user_id: targetUserId, 
+                    check_user_id: user.id 
+                });
+                const { data: iBlocked } = await supabase.rpc('is_blocked_by', { 
+                    target_user_id: user.id, 
+                    check_user_id: targetUserId 
+                });
+                if (blockedMe || iBlocked) isBlocked = true;
+            } catch (blockErr) {
+                // Ignore and fall back to table
+            }
+
+            if (!isBlocked) {
+                const { data: bRow } = await supabase
+                    .from('blocked_users')
+                    .select('id')
+                    .or(`and(blocker_id.eq.${user.id},blocked_id.eq.${targetUserId}),and(blocker_id.eq.${targetUserId},blocked_id.eq.${user.id})`)
+                    .limit(1);
+                if (bRow && bRow.length > 0) isBlocked = true;
+            }
+
+            if (isBlocked) {
+                return { 
+                    success: false, 
+                    error: 'Cannot start conversation: Communication is prohibited by block settings.' 
+                };
+            }
+
             // Check if conversation already exists
             const { data: myConvs } = await supabase
                 .from('conversation_members')
