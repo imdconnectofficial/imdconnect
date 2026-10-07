@@ -7,6 +7,8 @@ import { authService } from '../../services/auth.service.js';
 import { chatService } from '../../services/chat.service.js';
 import { realtimeService } from '../../services/realtime.service.js';
 import { storageService } from '../../services/storage.service.js';
+import { profileService } from '../../services/profile.service.js';
+import { CONFIG } from '../../config.js';
 import { supabase } from '../../core/supabase.js';
 import { router } from '../../core/router.js';
 
@@ -36,32 +38,12 @@ export const AppView = {
         // Load authenticated user profile
         this.state.currentUser = await authService.getUser();
         if (this.state.currentUser) {
-            const { data } = await supabase
-                .from('profiles')
-                .select('*')
-                .eq('id', this.state.currentUser.id)
-                .single();
-            this.state.currentProfile = data;
-
-            // Load counts for profile stats
-            const { count: fCount } = await supabase
-                .from('friendships')
-                .select('*', { count: 'exact', head: true })
-                .eq('user_id', this.state.currentUser.id);
-
-            const { count: gCount } = await supabase
-                .from('conversation_members')
-                .select('conversations!inner(type)', { count: 'exact', head: true })
-                .eq('user_id', this.state.currentUser.id)
-                .eq('conversations.type', 'group');
-
-            const joinYear = this.state.currentProfile?.created_at ? 
-                new Date(this.state.currentProfile.created_at).toLocaleDateString([], { month: 'short', year: 'numeric' }) : '2026';
-
+            const profileRes = await profileService.getProfile({ userId: this.state.currentUser.id });
+            this.state.currentProfile = profileRes.profile || null;
             this.state.stats = {
-                friendsCount: fCount || 0,
-                groupsCount: gCount || 0,
-                joinedDate: joinYear
+                friendsCount: this.state.currentProfile?.friends_count || 0,
+                groupsCount: this.state.currentProfile?.groups_count || 0,
+                joinedDate: this.state.currentProfile?.joinedDateFormatted || '2026'
             };
         }
 
@@ -651,7 +633,7 @@ export const AppView = {
     /**
      * Update Right Info Panel
      */
-    updateInfoPanel(root, conv) {
+    async updateInfoPanel(root, conv) {
         root.querySelector('#info-name-text').textContent = conv.title;
         root.querySelector('#info-handle-text').textContent = conv.peerUsername ? `@${conv.peerUsername}` : '@group';
         root.querySelector('#info-stat-handle').textContent = conv.peerUsername ? `@${conv.peerUsername}` : 'Group';
@@ -669,6 +651,32 @@ export const AppView = {
             avatarBox.innerHTML = `<img src="${conv.avatarUrl}" alt="${conv.title}" />`;
         } else {
             avatarBox.innerHTML = `<span>${conv.title.charAt(0).toUpperCase()}</span>`;
+        }
+
+        // Fetch peer profile details respecting privacy settings
+        if (conv.peerUsername) {
+            const peerRes = await profileService.getProfile({ username: conv.peerUsername });
+            if (peerRes.success && peerRes.profile) {
+                const peer = peerRes.profile;
+                const coverBox = root.querySelector('#info-cover-box img');
+                if (coverBox && peer.banner_url) {
+                    coverBox.src = peer.banner_url;
+                }
+
+                const aboutText = root.querySelector('#info-about-text');
+                const friendsCountEl = root.querySelector('#info-stat-friends');
+                const joinedDateEl = root.querySelector('#info-stat-joined');
+
+                if (peer.is_restricted) {
+                    if (aboutText) aboutText.textContent = peer.restricted_reason || 'This profile is private or friends only.';
+                    if (friendsCountEl) friendsCountEl.textContent = '—';
+                    if (joinedDateEl) joinedDateEl.textContent = peer.joinedDateFormatted || 'Private';
+                } else {
+                    if (aboutText) aboutText.textContent = peer.bio || 'Life is better with good conversations.';
+                    if (friendsCountEl) friendsCountEl.textContent = String(peer.friends_count ?? 0);
+                    if (joinedDateEl) joinedDateEl.textContent = peer.joinedDateFormatted || '2026';
+                }
+            }
         }
     },
 
@@ -793,7 +801,7 @@ export const AppView = {
                             src="${p.banner_url || 'data:image/svg+xml,%3Csvg xmlns=\\'http://www.w3.org/2000/svg\\' width=\\'100\\' height=\\'100\\'%3E%3Crect width=\\'100\\' height=\\'100\\' fill=\\'%231e293b\\'/%3E%3C/svg%3E'}" 
                             alt="Cover" 
                         />
-                        <button type="button" class="profile-banner-upload-btn" id="btn-change-banner-upload">
+                        <button type="button" class="profile-banner-upload-btn" id="btn-change-banner-upload" title="Change Cover Banner">
                             📷 Banner
                         </button>
                         <input type="file" id="profile-banner-file" accept="image/jpeg,image/png,image/webp" style="display: none;" />
@@ -810,6 +818,7 @@ export const AppView = {
                         </div>
 
                         <h3 class="profile-name-text">${displayName}</h3>
+                        <div style="font-size: 0.85rem; color: var(--accent); font-weight: 600; margin-bottom: 0.25rem;">@${username}</div>
                         <div class="profile-status-pill">
                             <span>●</span>
                             <span>Online</span>
@@ -833,7 +842,7 @@ export const AppView = {
 
                         <!-- Bio Box -->
                         <div class="profile-bio-box">
-                            <div class="profile-bio-title">Bio</div>
+                            <div class="profile-bio-title">About</div>
                             <div style="font-size: 0.875rem; color: var(--text-primary); line-height: 1.4;">
                                 ${p.bio || 'Good vibes only.'}
                             </div>
@@ -847,6 +856,13 @@ export const AppView = {
                                     <span>Edit Profile</span>
                                 </div>
                                 <span style="color: var(--text-muted);">›</span>
+                            </div>
+                            <div class="settings-row" id="row-prof-username">
+                                <div class="settings-row-left">
+                                    <span>🆔</span>
+                                    <span>Change Username</span>
+                                </div>
+                                <span class="form-hint" style="color: var(--accent); font-weight: 500;">7-Day Limit ›</span>
                             </div>
                             <div class="settings-row" id="row-prof-privacy">
                                 <div class="settings-row-left">
@@ -898,6 +914,10 @@ export const AppView = {
 
             list.querySelector('#row-prof-edit').addEventListener('click', () => {
                 this.showEditProfileModal(root);
+            });
+
+            list.querySelector('#row-prof-username').addEventListener('click', () => {
+                this.showChangeUsernameModal(root);
             });
 
             list.querySelector('#row-prof-privacy').addEventListener('click', () => {
@@ -1175,7 +1195,7 @@ export const AppView = {
     },
 
     /**
-     * Edit Profile Modal
+     * Edit Profile Modal (Name, Bio, Avatar, Cover)
      */
     showEditProfileModal(root) {
         const modal = root.querySelector('#modal-container');
@@ -1190,44 +1210,261 @@ export const AppView = {
                     <button type="button" id="btn-close-edit-modal" class="btn-icon" aria-label="Close modal">✕</button>
                 </div>
                 <div class="modal-dialog-body">
+                    <div id="modal-edit-alert" aria-live="polite"></div>
+
+                    <!-- Quick Media Upload Actions -->
+                    <div style="display: flex; gap: 0.75rem; margin-bottom: 1.25rem;">
+                        <button type="button" id="btn-modal-upload-avatar" class="btn-secondary" style="flex: 1; font-size: 0.8rem; padding: 0.5rem;">
+                            📷 Change Avatar
+                        </button>
+                        <input type="file" id="modal-avatar-file-input" accept="image/jpeg,image/png,image/webp" style="display: none;" />
+
+                        <button type="button" id="btn-modal-upload-cover" class="btn-secondary" style="flex: 1; font-size: 0.8rem; padding: 0.5rem;">
+                            🖼️ Change Cover
+                        </button>
+                        <input type="file" id="modal-cover-file-input" accept="image/jpeg,image/png,image/webp" style="display: none;" />
+                    </div>
+
                     <form id="edit-profile-form" style="display: flex; flex-direction: column; gap: 1rem;">
                         <div class="form-group">
-                            <label class="form-label">Display Name</label>
-                            <input type="text" id="edit-dispname-input" class="form-input" value="${p.display_name || ''}" required />
+                            <label class="form-label" for="edit-dispname-input">Display Name</label>
+                            <input type="text" id="edit-dispname-input" class="form-input" value="${p.display_name || ''}" minlength="2" maxlength="100" required />
+                            <span class="form-hint">Displayed to your contacts on ImdConnect.</span>
                         </div>
                         <div class="form-group">
-                            <label class="form-label">Bio</label>
-                            <textarea id="edit-bio-input" class="form-input" rows="3" style="resize: none;">${p.bio || ''}</textarea>
+                            <label class="form-label" for="edit-bio-input">About / Bio</label>
+                            <textarea id="edit-bio-input" class="form-input" rows="3" maxlength="500" style="resize: none;">${p.bio || ''}</textarea>
+                            <span class="form-hint">Max 500 characters.</span>
                         </div>
-                        <button type="submit" class="btn-primary">Save Changes</button>
+                        <button type="submit" id="btn-save-profile-modal" class="btn-primary">Save Changes</button>
                     </form>
                 </div>
             </div>
         `;
 
+        const alertBox = modal.querySelector('#modal-edit-alert');
+
         modal.querySelector('#btn-close-edit-modal').addEventListener('click', () => {
             modal.style.display = 'none';
         });
 
+        // Avatar Upload from Modal
+        const avatarBtn = modal.querySelector('#btn-modal-upload-avatar');
+        const avatarInput = modal.querySelector('#modal-avatar-file-input');
+        avatarBtn.addEventListener('click', () => avatarInput.click());
+        avatarInput.addEventListener('change', async (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            alertBox.innerHTML = `<div class="alert-box alert-info">Uploading avatar...</div>`;
+            const res = await profileService.updateAvatar(file);
+            if (res.success) {
+                this.state.currentProfile.avatar_url = res.url;
+                alertBox.innerHTML = `<div class="alert-box alert-success">Avatar updated!</div>`;
+                this.renderActiveTabContent(root);
+            } else {
+                alertBox.innerHTML = `<div class="alert-box alert-error">${res.error}</div>`;
+            }
+        });
+
+        // Cover Upload from Modal
+        const coverBtn = modal.querySelector('#btn-modal-upload-cover');
+        const coverInput = modal.querySelector('#modal-cover-file-input');
+        coverBtn.addEventListener('click', () => coverInput.click());
+        coverInput.addEventListener('change', async (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            alertBox.innerHTML = `<div class="alert-box alert-info">Uploading cover...</div>`;
+            const res = await profileService.updateCover(file);
+            if (res.success) {
+                this.state.currentProfile.banner_url = res.url;
+                alertBox.innerHTML = `<div class="alert-box alert-success">Cover updated!</div>`;
+                this.renderActiveTabContent(root);
+            } else {
+                alertBox.innerHTML = `<div class="alert-box alert-error">${res.error}</div>`;
+            }
+        });
+
         modal.querySelector('#edit-profile-form').addEventListener('submit', async (e) => {
             e.preventDefault();
+            alertBox.innerHTML = '';
             const disp = modal.querySelector('#edit-dispname-input').value.trim();
             const bio = modal.querySelector('#edit-bio-input').value.trim();
+            const submitBtn = modal.querySelector('#btn-save-profile-modal');
 
-            const { error } = await supabase
-                .from('profiles')
-                .update({ display_name: disp, bio: bio, updated_at: new Date().toISOString() })
-                .eq('id', this.state.currentUser.id);
+            submitBtn.disabled = true;
+            submitBtn.innerHTML = '<span class="spinner"></span> Saving...';
 
-            if (error) {
-                alert('Failed to update profile: ' + error.message);
+            const res = await profileService.updateProfile({ displayName: disp, bio: bio });
+
+            if (!res.success) {
+                alertBox.innerHTML = `<div class="alert-box alert-error">${res.error}</div>`;
+                submitBtn.disabled = false;
+                submitBtn.textContent = 'Save Changes';
             } else {
                 this.state.currentProfile.display_name = disp;
                 this.state.currentProfile.bio = bio;
-                modal.style.display = 'none';
-                this.renderActiveTabContent(root);
+                alertBox.innerHTML = `<div class="alert-box alert-success">Profile updated successfully!</div>`;
+                setTimeout(() => {
+                    modal.style.display = 'none';
+                    this.renderActiveTabContent(root);
+                }, 800);
             }
         });
+    },
+
+    /**
+     * Change Username Modal (Enforcing 7-Day Cooldown)
+     */
+    async showChangeUsernameModal(root) {
+        const modal = root.querySelector('#modal-container');
+        modal.style.display = 'flex';
+        modal.className = 'modal-overlay';
+
+        modal.innerHTML = `
+            <div class="modal-dialog">
+                <div class="modal-dialog-header">
+                    <h3 class="modal-dialog-title">Change Username</h3>
+                    <button type="button" id="btn-close-uname-modal" class="btn-icon" aria-label="Close modal">✕</button>
+                </div>
+                <div class="modal-dialog-body">
+                    <div class="empty-state-box"><span class="spinner" style="border-top-color: var(--accent);"></span></div>
+                </div>
+            </div>
+        `;
+
+        modal.querySelector('#btn-close-uname-modal').addEventListener('click', () => {
+            modal.style.display = 'none';
+        });
+
+        const eligibility = await profileService.getUsernameEligibility();
+        const p = this.state.currentProfile || {};
+        const currentUsername = p.username || eligibility.currentUsername || 'user';
+
+        const body = modal.querySelector('.modal-dialog-body');
+        body.innerHTML = `
+            <div id="modal-uname-alert" aria-live="polite"></div>
+
+            <div style="padding: 0.75rem 1rem; border-radius: var(--radius-md); background: var(--bg-surface-elevated); border: 1px solid var(--border-color); margin-bottom: 1rem; font-size: 0.85rem;">
+                <div><strong>Current Username:</strong> <span style="color: var(--accent); font-weight: 600;">@${currentUsername}</span></div>
+                <div style="font-size: 0.775rem; color: var(--text-muted); margin-top: 0.25rem;">
+                    Policy: You can change your username only once every 7 days.
+                </div>
+                ${!eligibility.canChange ? `
+                    <div style="margin-top: 0.5rem; color: var(--color-warning); font-size: 0.8rem;">
+                        ⏳ <strong>Next Available Change:</strong> ${eligibility.formattedNextDate} (${eligibility.daysRemaining} days remaining)
+                    </div>
+                ` : `
+                    <div style="margin-top: 0.5rem; color: var(--color-success); font-size: 0.8rem;">
+                        ✓ You are eligible to update your username today.
+                    </div>
+                `}
+            </div>
+
+            <form id="modal-uname-form" style="display: flex; flex-direction: column; gap: 1rem;">
+                <div class="form-group">
+                    <div class="form-row-meta">
+                        <label for="modal-new-uname" class="form-label">New Username</label>
+                        <span id="modal-uname-feedback" class="feedback-text feedback-neutral"></span>
+                    </div>
+                    <input 
+                        type="text" 
+                        id="modal-new-uname" 
+                        class="form-input" 
+                        placeholder="e.g. cyber_alex" 
+                        spellcheck="false"
+                        autocomplete="off"
+                        ${!eligibility.canChange ? 'disabled' : ''} 
+                        required 
+                    />
+                    <span class="form-hint">3-30 lowercase characters (letters, numbers, underscores).</span>
+                </div>
+
+                <button 
+                    type="submit" 
+                    id="btn-modal-submit-uname" 
+                    class="btn-primary" 
+                    ${!eligibility.canChange ? 'disabled' : ''}
+                >
+                    ${eligibility.canChange ? 'Update Username' : 'Cooldown Active (7 Days)'}
+                </button>
+            </form>
+        `;
+
+        if (eligibility.canChange) {
+            const input = body.querySelector('#modal-new-uname');
+            const feedback = body.querySelector('#modal-uname-feedback');
+            const submitBtn = body.querySelector('#btn-modal-submit-uname');
+            let debounce = null;
+
+            input.addEventListener('input', () => {
+                clearTimeout(debounce);
+                const rawVal = input.value.trim().toLowerCase().replace(/^@/, '');
+                input.value = rawVal;
+
+                if (!rawVal) {
+                    feedback.textContent = '';
+                    input.classList.remove('is-valid', 'is-invalid');
+                    submitBtn.disabled = true;
+                    return;
+                }
+
+                if (!CONFIG.USERNAME_REGEX.test(rawVal)) {
+                    feedback.textContent = '✗ 3-30 lowercase letters/nums/_';
+                    feedback.className = 'feedback-text feedback-invalid';
+                    input.classList.remove('is-valid');
+                    input.classList.add('is-invalid');
+                    submitBtn.disabled = true;
+                    return;
+                }
+
+                feedback.textContent = 'Checking availability...';
+                feedback.className = 'feedback-text feedback-neutral';
+
+                debounce = setTimeout(async () => {
+                    const check = await authService.checkUsernameAvailability(rawVal);
+                    if (input.value !== rawVal) return;
+
+                    if (check.available) {
+                        feedback.textContent = '✓ Available';
+                        feedback.className = 'feedback-text feedback-valid';
+                        input.classList.remove('is-invalid');
+                        input.classList.add('is-valid');
+                        submitBtn.disabled = false;
+                    } else {
+                        feedback.textContent = `✗ ${check.error || 'Taken'}`;
+                        feedback.className = 'feedback-text feedback-invalid';
+                        input.classList.remove('is-valid');
+                        input.classList.add('is-invalid');
+                        submitBtn.disabled = true;
+                    }
+                }, 300);
+            });
+
+            body.querySelector('#modal-uname-form').addEventListener('submit', async (e) => {
+                e.preventDefault();
+                const alertArea = body.querySelector('#modal-uname-alert');
+                alertArea.innerHTML = '';
+                const newUname = input.value.trim().toLowerCase().replace(/^@/, '');
+                if (!newUname) return;
+
+                submitBtn.disabled = true;
+                submitBtn.innerHTML = '<span class="spinner"></span> Updating...';
+
+                const res = await profileService.changeUsername(newUname);
+                if (!res.success) {
+                    alertArea.innerHTML = `<div class="alert-box alert-error">${res.error}</div>`;
+                    submitBtn.disabled = false;
+                    submitBtn.textContent = 'Update Username';
+                } else {
+                    this.state.currentProfile.username = res.newUsername;
+                    alertArea.innerHTML = `<div class="alert-box alert-success">Username successfully changed to @${res.newUsername}!</div>`;
+                    setTimeout(() => {
+                        modal.style.display = 'none';
+                        this.renderActiveTabContent(root);
+                    }, 1200);
+                }
+            });
+        }
     },
 
     /**

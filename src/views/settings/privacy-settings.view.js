@@ -60,6 +60,16 @@ export const PrivacySettingsView = {
                     
                     <div style="display: flex; flex-direction: column; gap: 1.25rem;">
                         <div class="form-group">
+                            <label class="form-label" for="select-profile-visibility">Profile Visibility</label>
+                            <select id="select-profile-visibility" class="form-input">
+                                <option value="everyone" ${privacy.profile_visibility === 'everyone' || !privacy.profile_visibility ? 'selected' : ''}>Everyone (Public Profile)</option>
+                                <option value="friends_only" ${privacy.profile_visibility === 'friends_only' ? 'selected' : ''}>Friends Only (Mutual Contacts)</option>
+                                <option value="nobody" ${privacy.profile_visibility === 'nobody' ? 'selected' : ''}>Nobody (Completely Private)</option>
+                            </select>
+                            <span class="form-hint">Controls who can view your full profile details, bio, and counts. Date of birth is always strictly confidential.</span>
+                        </div>
+
+                        <div class="form-group">
                             <label class="form-label">Who Can Send Me Direct Messages</label>
                             <select id="select-who-message" class="form-input">
                                 <option value="everyone" ${privacy.who_can_message_me === 'everyone' ? 'selected' : ''}>Everyone (Any User)</option>
@@ -141,6 +151,7 @@ export const PrivacySettingsView = {
             alertArea.innerHTML = `<div class="alert-box alert-info">Saving privacy settings...</div>`;
 
             const updates = {
+                profile_visibility: root.querySelector('#select-profile-visibility').value,
                 online_status_visible: root.querySelector('#toggle-online-status').checked,
                 read_receipts_enabled: root.querySelector('#toggle-read-receipts').checked,
                 last_seen_visible: root.querySelector('#toggle-last-seen').checked,

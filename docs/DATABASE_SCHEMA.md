@@ -163,6 +163,7 @@ Zero-knowledge cryptographic key backup records.
 | Column | Type | Constraints | Description |
 |:---|:---|:---|:---|
 | `user_id` | `UUID` | `PK REFERENCES profiles(id) ON DELETE CASCADE` | User ID. |
+| `profile_visibility` | `VARCHAR(15)` | `DEFAULT 'everyone' CHECK ('everyone', 'friends_only', 'nobody')` | Profile details visibility (Public, Friends Only, or Private). |
 | `who_can_message_me` | `VARCHAR(15)` | `DEFAULT 'everyone' CHECK ('everyone', 'friends_only', 'nobody')` | Inbound DM filter. |
 | `who_can_add_to_groups` | `VARCHAR(15)` | `DEFAULT 'everyone' CHECK ('everyone', 'friends_only', 'nobody')` | Group invitation filter. |
 | `read_receipts_enabled` | `BOOLEAN` | `NOT NULL DEFAULT TRUE` | Read ticks broadcast toggle. |
@@ -171,6 +172,10 @@ Zero-knowledge cryptographic key backup records.
 | `default_disappearing_timer`| `INTEGER` | `DEFAULT 0 CHECK (0, 30, 300, 3600, 86400, 604800)` | Default disappearing timer (seconds). |
 | `created_at` | `TIMESTAMPTZ` | `NOT NULL DEFAULT NOW()` | Record creation. |
 | `updated_at` | `TIMESTAMPTZ` | `NOT NULL DEFAULT NOW()` | Record update. |
+
+> [!NOTE]
+> **7-Day Username Cooldown Policy:**  
+> PostgreSQL trigger `trg_enforce_username_cooldown` and RPC `public.update_username(p_new_username)` enforce that usernames can be changed **only once every 7 days**. Early changes are rejected server-side, timestamps are tracked in `profiles.last_username_change_at`, and every change is recorded in `public.username_history`.
 
 #### Table: `public.notification_settings`
 | Column | Type | Constraints | Description |
