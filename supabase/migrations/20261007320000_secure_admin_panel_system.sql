@@ -14,7 +14,7 @@
 -- 1. Schema Hardening & Extensions
 -- ------------------------------------------------------------------------------
 
--- 1.1 Ensure is_suspended on groups and conversations
+-- 1.1 Ensure is_suspended on groups and conversations, and role/status on profiles
 DO $$
 BEGIN
     IF NOT EXISTS (
@@ -29,6 +29,29 @@ BEGIN
         WHERE table_schema = 'public' AND table_name = 'groups' AND column_name = 'suspension_reason'
     ) THEN
         ALTER TABLE public.groups ADD COLUMN suspension_reason TEXT;
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns 
+        WHERE table_schema = 'public' AND table_name = 'profiles' AND column_name = 'role'
+    ) THEN
+        ALTER TABLE public.profiles ADD COLUMN role VARCHAR(20) NOT NULL DEFAULT 'user';
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns 
+        WHERE table_schema = 'public' AND table_name = 'profiles' AND column_name = 'status'
+    ) THEN
+        ALTER TABLE public.profiles ADD COLUMN status VARCHAR(20) NOT NULL DEFAULT 'active';
+    END IF;
+
+    -- Ensure app_admins allows 'admin' role
+    IF EXISTS (
+        SELECT 1 FROM information_schema.tables 
+        WHERE table_schema = 'public' AND table_name = 'app_admins'
+    ) THEN
+        ALTER TABLE public.app_admins DROP CONSTRAINT IF EXISTS app_admins_role_check;
+        ALTER TABLE public.app_admins ADD CONSTRAINT app_admins_role_check CHECK (role IN ('superadmin', 'admin', 'moderator', 'support'));
     END IF;
 END $$;
 
