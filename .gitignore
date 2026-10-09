@@ -1,5 +1,6 @@
 # ==============================================================================
-# ImdConnect — Git Ignore Rules & Secret Protection
+# ImdConnect — Comprehensive Git Ignore & Zero-Secret Protection Policy
+# Strict Enforcement: NEVER commit secrets, private tokens, or service-role keys.
 # ==============================================================================
 
 # 1. Environment & Secrets (NEVER COMMIT)
@@ -14,15 +15,17 @@
 *.secrets
 secrets/
 credentials/
+credentials.json
+service_account*.json
 
-# 2. Supabase Specific Secrets & Service Role Protection
+# 2. Supabase Service Role & Backend Secret Protection
 *service_role*
 *service-role*
 supabase/.temp/
 supabase/.branches/
 .supabase/
 
-# 3. Cryptographic Keys & Certificates
+# 3. Cryptographic Keys, Certificates & Tokens
 *.pem
 *.key
 *.cert
@@ -30,23 +33,51 @@ supabase/.branches/
 *.pfx
 *.p12
 *.keystore
+*.der
+*.pk8
+*.ppk
+*.kdbx
+*.jks
 id_rsa*
 id_ed25519*
+id_ecdsa*
+jwt.key
+jwt.secret
+*.token
+tokens.json
 
-# 4. Dependency Directories (if build tools are used in local dev)
+# 4. Database Credentials & Storage Dumps
+*.sql.dump
+*.dump
+*.sqlite
+*.sqlite3
+*.db
+database.json
+
+# 5. SMTP & Mail Credentials
+*.smtp
+smtp.json
+mail.json
+
+# 6. Cloudflare & Serverless Local Configs
+.wrangler/
+wrangler.toml.local
+wrangler.json.local
+
+# 7. Dependency Directories (Local Development Tools)
 node_modules/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 
-# 5. Build & Output Directories
+# 8. Build, Cache & Output Artifacts
 dist/
 build/
 out/
 .cache/
 
-# 6. Operating System Files
+# 9. Operating System Artifacts
 .DS_Store
 .DS_Store?
 ._*
@@ -56,7 +87,7 @@ ehthumbs.db
 Thumbs.db
 desktop.ini
 
-# 7. Editor & IDE Settings
+# 10. Editor & IDE Settings
 .idea/
 .vscode/*
 !.vscode/extensions.json
@@ -68,9 +99,13 @@ desktop.ini
 *.sw?
 *~
 
-# 8. Temporary Files & Logs
+# 11. Temporary Files, Logs & Testing Browser Profiles
 *.log
 *.tmp
 *.temp
 tmp/
 temp/
+tests/.chrome_*
+tests/.chrome_*/**
+tests/screenshots/
+tests/screenshots/**

@@ -4,33 +4,12 @@
 // ==============================================================================
 import { router } from './core/router.js';
 import { authService } from './services/auth.service.js';
+import { realtimeService } from './services/realtime.service.js';
 
-// Public Views
+// Core Views (Preloaded for instant interactive shell)
 import { SplashView } from './views/splash.view.js';
 import { LoginView } from './views/auth/login.view.js';
-import { RegisterView } from './views/auth/register.view.js';
-import { ForgotPasswordView } from './views/auth/forgot-password.view.js';
-import { ResetPasswordView } from './views/auth/reset-password.view.js';
-import { VerifyEmailView } from './views/auth/verify-email.view.js';
-import { TermsView } from './views/public/terms.view.js';
-import { PrivacyView } from './views/public/privacy.view.js';
-
-// Authenticated Views
 import { AppView } from './views/app/app.view.js';
-
-// Settings Views
-import { AccountSettingsView } from './views/settings/account-settings.view.js';
-import { PrivacySettingsView } from './views/settings/privacy-settings.view.js';
-import { NotificationSettingsView } from './views/settings/notification-settings.view.js';
-import { ThemeSettingsView } from './views/settings/theme-settings.view.js';
-import { SecuritySettingsView } from './views/settings/security-settings.view.js';
-
-// Admin Views
-import { AdminDashboardView } from './views/admin/admin-dashboard.view.js';
-import { AdminUsersView } from './views/admin/admin-users.view.js';
-import { AdminGroupsView } from './views/admin/admin-groups.view.js';
-import { AdminReportsView } from './views/admin/admin-reports.view.js';
-import { AdminModerationView } from './views/admin/admin-moderation.view.js';
 
 // 1. Initialize Saved Theme
 function initTheme() {
@@ -51,7 +30,7 @@ async function bootstrap() {
     }
 
     // --------------------------------------------------------------------------
-    // 3. Register PUBLIC Routes
+    // 3. Register PUBLIC Routes (Core eager, secondary lazy-loaded)
     // --------------------------------------------------------------------------
     router.register(['#/', '/'], {
         view: SplashView,
@@ -64,33 +43,39 @@ async function bootstrap() {
     });
 
     router.register(['#/register', '/register', '#/auth/register'], {
-        view: RegisterView,
+        loader: () => import('./views/auth/register.view.js'),
+        exportName: 'RegisterView',
         requiresGuest: true
     });
 
     router.register(['#/forgot-password', '/forgot-password', '#/auth/forgot-password'], {
-        view: ForgotPasswordView,
+        loader: () => import('./views/auth/forgot-password.view.js'),
+        exportName: 'ForgotPasswordView',
         requiresGuest: true
     });
 
     router.register(['#/reset-password', '/reset-password', '#/auth/reset-password'], {
-        view: ResetPasswordView
+        loader: () => import('./views/auth/reset-password.view.js'),
+        exportName: 'ResetPasswordView'
     });
 
     router.register(['#/verify-email', '/verify-email', '#/auth/verify-email'], {
-        view: VerifyEmailView
+        loader: () => import('./views/auth/verify-email.view.js'),
+        exportName: 'VerifyEmailView'
     });
 
     router.register(['#/terms', '/terms'], {
-        view: TermsView
+        loader: () => import('./views/public/terms.view.js'),
+        exportName: 'TermsView'
     });
 
     router.register(['#/privacy', '/privacy'], {
-        view: PrivacyView
+        loader: () => import('./views/public/privacy.view.js'),
+        exportName: 'PrivacyView'
     });
 
     // --------------------------------------------------------------------------
-    // 4. Register AUTHENTICATED Routes
+    // 4. Register AUTHENTICATED Main Application Routes
     // --------------------------------------------------------------------------
     router.register(['#/chats', '#/app'], {
         view: AppView,
@@ -123,58 +108,68 @@ async function bootstrap() {
     });
 
     // --------------------------------------------------------------------------
-    // 5. Register SETTINGS Sub-Routes
+    // 5. Register SETTINGS Sub-Routes (Lazy loaded on demand)
     // --------------------------------------------------------------------------
     router.register(['#/settings/account', '#/app/account'], {
-        view: AccountSettingsView,
+        loader: () => import('./views/settings/account-settings.view.js'),
+        exportName: 'AccountSettingsView',
         requiresAuth: true
     });
 
     router.register(['#/settings/privacy'], {
-        view: PrivacySettingsView,
+        loader: () => import('./views/settings/privacy-settings.view.js'),
+        exportName: 'PrivacySettingsView',
         requiresAuth: true
     });
 
     router.register(['#/settings/notifications'], {
-        view: NotificationSettingsView,
+        loader: () => import('./views/settings/notification-settings.view.js'),
+        exportName: 'NotificationSettingsView',
         requiresAuth: true
     });
 
     router.register(['#/settings/theme'], {
-        view: ThemeSettingsView,
+        loader: () => import('./views/settings/theme-settings.view.js'),
+        exportName: 'ThemeSettingsView',
         requiresAuth: true
     });
 
     router.register(['#/settings/security'], {
-        view: SecuritySettingsView,
+        loader: () => import('./views/settings/security-settings.view.js'),
+        exportName: 'SecuritySettingsView',
         requiresAuth: true
     });
 
     // --------------------------------------------------------------------------
-    // 6. Register ADMIN Routes (Guarded with requiresAdmin)
+    // 6. Register ADMIN Routes (Lazy loaded on demand & guarded)
     // --------------------------------------------------------------------------
     router.register(['#/admin'], {
-        view: AdminDashboardView,
+        loader: () => import('./views/admin/admin-dashboard.view.js'),
+        exportName: 'AdminDashboardView',
         requiresAdmin: true
     });
 
     router.register(['#/admin/users'], {
-        view: AdminUsersView,
+        loader: () => import('./views/admin/admin-users.view.js'),
+        exportName: 'AdminUsersView',
         requiresAdmin: true
     });
 
     router.register(['#/admin/groups'], {
-        view: AdminGroupsView,
+        loader: () => import('./views/admin/admin-groups.view.js'),
+        exportName: 'AdminGroupsView',
         requiresAdmin: true
     });
 
     router.register(['#/admin/reports'], {
-        view: AdminReportsView,
+        loader: () => import('./views/admin/admin-reports.view.js'),
+        exportName: 'AdminReportsView',
         requiresAdmin: true
     });
 
     router.register(['#/admin/moderation'], {
-        view: AdminModerationView,
+        loader: () => import('./views/admin/admin-moderation.view.js'),
+        exportName: 'AdminModerationView',
         requiresAdmin: true
     });
 
@@ -196,6 +191,93 @@ async function bootstrap() {
 
     // 8. Mount Router
     router.init(appRoot);
+
+    // 9. Initialize Global Connection Status Banner
+    initConnectionStatusIndicator();
+
+    // 10. Initialize PWA Service Worker & Install Capability
+    initPWA();
 }
 
-document.addEventListener('DOMContentLoaded', bootstrap);
+/**
+ * Initialize Global Realtime & Offline Connection Status Indicator
+ * Seamlessly informs user when offline, reconnecting, or restored
+ */
+function initConnectionStatusIndicator() {
+    const banner = document.getElementById('connection-status-banner');
+    if (!banner) return;
+    const icon = document.getElementById('connection-status-icon');
+    const text = document.getElementById('connection-status-text');
+
+    realtimeService.onStatusChange((status) => {
+        banner.classList.remove('status-offline', 'status-reconnecting', 'status-connected');
+
+        if (status === 'offline') {
+            banner.classList.add('status-offline');
+            if (icon) icon.innerHTML = '⚡';
+            if (text) text.textContent = 'You are offline — Encrypted communications paused';
+            banner.style.display = 'flex';
+        } else if (status === 'reconnecting') {
+            banner.classList.add('status-reconnecting');
+            if (icon) icon.innerHTML = '<span class="status-spinner"></span>';
+            if (text) text.textContent = 'Reconnecting to secure realtime channel...';
+            banner.style.display = 'flex';
+        } else if (status === 'disconnected') {
+            banner.classList.add('status-reconnecting');
+            if (icon) icon.innerHTML = '⚠️';
+            if (text) text.textContent = 'Realtime disconnected. Reconnecting...';
+            banner.style.display = 'flex';
+        } else if (status === 'connected') {
+            if (banner.style.display !== 'none' && !banner.classList.contains('status-connected')) {
+                banner.classList.add('status-connected');
+                if (icon) icon.innerHTML = '✓';
+                if (text) text.textContent = 'Connected';
+                setTimeout(() => {
+                    banner.style.display = 'none';
+                    banner.classList.remove('status-connected');
+                }, 1500);
+            } else {
+                banner.style.display = 'none';
+            }
+        }
+    });
+}
+
+/**
+ * Initialize Progressive Web App Support
+ * Registers Service Worker with security boundaries and captures install prompt
+ */
+function initPWA() {
+    if ('serviceWorker' in navigator && (window.location.protocol === 'https:' || window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')) {
+        const registerWorker = () => {
+            navigator.serviceWorker.register('/sw.js', { scope: '/' })
+                .then((registration) => {
+                    console.log('[ImdConnect PWA] Service Worker registered:', registration.scope);
+                })
+                .catch((err) => {
+                    console.warn('[ImdConnect PWA] Service Worker registration failed:', err);
+                });
+        };
+
+        if (document.readyState === 'complete') {
+            registerWorker();
+        } else {
+            window.addEventListener('load', registerWorker);
+        }
+    }
+
+    // Capture install prompt for PWA installation UI
+    window.addEventListener('beforeinstallprompt', (e) => {
+        e.preventDefault();
+        window.deferredPWAInstallPrompt = e;
+        window.dispatchEvent(new CustomEvent('pwa:installable'));
+    });
+}
+
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', bootstrap);
+} else {
+    bootstrap();
+}
+
+

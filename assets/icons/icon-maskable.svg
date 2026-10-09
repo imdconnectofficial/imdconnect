@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+    <defs>
+        <linearGradient id="maskGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="0%" stop-color="#1D4ED8"/>
+            <stop offset="50%" stop-color="#2563EB"/>
+            <stop offset="100%" stop-color="#6D28D9"/>
+        </linearGradient>
+        <linearGradient id="bubbleGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="0%" stop-color="#FFFFFF"/>
+            <stop offset="100%" stop-color="#F1F5F9"/>
+        </linearGradient>
+    </defs>
+
+    <!-- Edge-to-Edge Maskable Safe Canvas -->
+    <rect width="512" height="512" fill="url(#maskGrad)"/>
+
+    <!-- Scaled to 75% to sit squarely in 80% safe zone circle -->
+    <g transform="translate(64, 64) scale(0.75)">
+        <!-- Speech Bubble Base -->
+        <path d="M 256 96 C 160 96 82 166 82 252 C 82 296 102 336 136 364 C 130 398 114 424 96 440 C 134 440 182 422 216 398 C 229 401 242 404 256 404 C 352 404 430 334 430 252 C 430 166 352 96 256 96 Z" 
+              fill="url(#bubbleGrad)"/>
+
+        <!-- Privacy Shield Center Core -->
+        <path d="M 256 160 C 280 188 316 196 330 198 C 330 268 288 322 256 342 C 224 322 182 268 182 198 C 196 196 232 188 256 160 Z" 
+              fill="url(#maskGrad)"/>
+
+        <!-- Keyhole / Secure Core Dot -->
+        <circle cx="256" cy="236" r="18" fill="#FFFFFF"/>
+        <path d="M 250 248 L 262 248 L 266 284 L 246 284 Z" fill="#FFFFFF"/>
+    </g>
+</svg>

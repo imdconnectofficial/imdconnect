@@ -134,12 +134,26 @@ class Router {
             this.currentView.unmount();
         }
 
+        // Resolve view (eager component or lazy-loaded module)
+        let view = routeConfig.view;
+        if (!view && typeof routeConfig.loader === 'function') {
+            try {
+                const mod = await routeConfig.loader();
+                view = (routeConfig.exportName && mod[routeConfig.exportName]) || mod.default || Object.values(mod)[0];
+                routeConfig.view = view; // Cache resolved module for instantaneous return visits
+            } catch (err) {
+                console.error('[Router] Failed to dynamically load route component:', err);
+                this.navigate('#/chats');
+                return;
+            }
+        }
+
         // Instantiate and mount view
-        this.currentView = routeConfig.view;
+        this.currentView = view;
         if (this.currentView && typeof this.currentView.render === 'function') {
             this.appRoot.innerHTML = '';
-            const viewElement = await this.currentView.render();
-            if (viewElement) {
+            const viewElement = await this.currentView.render(this.appRoot);
+            if (viewElement && viewElement !== this.appRoot && !this.appRoot.contains(viewElement)) {
                 this.appRoot.appendChild(viewElement);
             }
         }

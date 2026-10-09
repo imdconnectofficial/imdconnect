@@ -8,18 +8,34 @@ import { authService } from './auth.service.js';
 class ChatService {
     /**
      * Fetch all conversations for the authenticated user
+     * Uses optimized RPC with batch fallback (Zero N+1 database queries)
+     * @param {Object} [options]
+     * @param {number} [options.limit=40]
+     * @param {number} [options.offset=0]
      * @returns {Promise<Array>}
      */
-    async getConversations() {
+    async getConversations({ limit = 40, offset = 0 } = {}) {
         const user = await authService.getUser();
         if (!user) return [];
 
         try {
-            // 1. Get conversation memberships
+            // 1. Primary: Unified RPC to eliminate N+1 roundtrips in a single join query
+            const { data: rpcData, error: rpcErr } = await supabase.rpc('get_user_conversations_optimized', {
+                p_limit: limit,
+                p_offset: offset
+            });
+
+            if (!rpcErr && Array.isArray(rpcData)) {
+                return rpcData;
+            }
+
+            // 2. Fallback: Batch retrieval (O(1) queries instead of O(N) loop)
             const { data: memberRows, error: memberErr } = await supabase
                 .from('conversation_members')
-                .select('conversation_id, role, is_muted, is_pinned, is_archived, last_read_at')
-                .eq('user_id', user.id);
+                .select('conversation_id, role, is_muted, is_pinned, is_archived, last_read_at, is_privacy_mode')
+                .eq('user_id', user.id)
+                .eq('is_archived', false)
+                .range(offset, offset + limit - 1);
 
             if (memberErr || !memberRows || memberRows.length === 0) {
                 return [];
@@ -27,76 +43,101 @@ class ChatService {
 
             const convIds = memberRows.map(m => m.conversation_id);
 
-            // 2. Fetch conversations metadata
+            // Batch fetch conversations metadata
             const { data: convRows, error: convErr } = await supabase
                 .from('conversations')
-                .select('*')
+                .select('id, type, disappearing_timer, is_privacy_mode, updated_at')
                 .in('id', convIds)
                 .order('updated_at', { ascending: false });
 
             if (convErr || !convRows) return [];
 
-            // 3. Enrich conversations with peer/group details & latest message
-            const enriched = await Promise.all(convRows.map(async (conv) => {
+            const groupConvIds = convRows.filter(c => c.type === 'group').map(c => c.id);
+            const directConvIds = convRows.filter(c => c.type === 'direct').map(c => c.id);
+
+            // Batch fetch all groups metadata in 1 query
+            const groupsMap = new Map();
+            if (groupConvIds.length > 0) {
+                const { data: groups } = await supabase
+                    .from('groups')
+                    .select('conversation_id, name, description, avatar_url, owner_id')
+                    .in('conversation_id', groupConvIds);
+                (groups || []).forEach(g => groupsMap.set(g.conversation_id, g));
+            }
+
+            // Batch fetch peer memberships in 1 query
+            const peersMap = new Map();
+            if (directConvIds.length > 0) {
+                const { data: peerMembers } = await supabase
+                    .from('conversation_members')
+                    .select('conversation_id, user_id')
+                    .in('conversation_id', directConvIds)
+                    .neq('user_id', user.id);
+
+                const peerUserIds = [...new Set((peerMembers || []).map(p => p.user_id))];
+                const profilesMap = new Map();
+
+                if (peerUserIds.length > 0) {
+                    const { data: profiles } = await supabase
+                        .from('public_profiles')
+                        .select('id, username, display_name, avatar_url, last_seen_at')
+                        .in('id', peerUserIds);
+                    (profiles || []).forEach(p => profilesMap.set(p.id, p));
+                }
+
+                (peerMembers || []).forEach(pm => {
+                    const prof = profilesMap.get(pm.user_id);
+                    if (prof) peersMap.set(pm.conversation_id, prof);
+                });
+            }
+
+            // Batch fetch latest messages for each conversation in 1 indexed query
+            const lastMsgsMap = new Map();
+            const { data: latestMsgs } = await supabase
+                .from('messages')
+                .select('id, conversation_id, sender_id, ciphertext, sent_at, created_at')
+                .in('conversation_id', convIds)
+                .eq('is_deleted_for_all', false)
+                .order('created_at', { ascending: false });
+
+            (latestMsgs || []).forEach(m => {
+                if (!lastMsgsMap.has(m.conversation_id)) {
+                    lastMsgsMap.set(m.conversation_id, m);
+                }
+            });
+
+            // Assemble enriched models in memory without further I/O
+            return convRows.map(conv => {
                 const membership = memberRows.find(m => m.conversation_id === conv.id);
                 let title = 'Conversation';
                 let avatarUrl = '';
                 let peerUsername = '';
                 let isOnline = false;
-
                 let description = '';
                 let ownerId = '';
 
                 if (conv.type === 'group') {
-                    const { data: grp } = await supabase
-                        .from('groups')
-                        .select('name, description, avatar_url, owner_id')
-                        .eq('conversation_id', conv.id)
-                        .single();
+                    const grp = groupsMap.get(conv.id);
                     if (grp) {
                         title = grp.name;
-                        avatarUrl = grp.avatar_url;
+                        avatarUrl = grp.avatar_url || '';
                         description = grp.description || '';
                         ownerId = grp.owner_id || '';
                     }
                 } else {
-                    // Direct 1-on-1: find the other participant
-                    const { data: peers } = await supabase
-                        .from('conversation_members')
-                        .select('user_id')
-                        .eq('conversation_id', conv.id)
-                        .neq('user_id', user.id);
-
-                    if (peers && peers.length > 0) {
-                        const peerId = peers[0].user_id;
-                        const { data: peerProfile } = await supabase
-                            .from('public_profiles')
-                            .select('username, display_name, avatar_url, last_seen_at')
-                            .eq('id', peerId)
-                            .single();
-
-                        if (peerProfile) {
-                            title = peerProfile.display_name || `@${peerProfile.username}`;
-                            peerUsername = peerProfile.username;
-                            avatarUrl = peerProfile.avatar_url;
-                            if (peerProfile.last_seen_at) {
-                                const diff = (Date.now() - new Date(peerProfile.last_seen_at).getTime()) / 1000;
-                                isOnline = diff < 180; // active in last 3 mins
-                            }
+                    const peer = peersMap.get(conv.id);
+                    if (peer) {
+                        title = peer.display_name || `@${peer.username}`;
+                        peerUsername = peer.username;
+                        avatarUrl = peer.avatar_url || '';
+                        if (peer.last_seen_at) {
+                            const diff = (Date.now() - new Date(peer.last_seen_at).getTime()) / 1000;
+                            isOnline = diff < 180;
                         }
                     }
                 }
 
-                // 4. Fetch latest text message
-                const { data: lastMsgs } = await supabase
-                    .from('messages')
-                    .select('id, sender_id, ciphertext, sent_at, created_at')
-                    .eq('conversation_id', conv.id)
-                    .order('created_at', { ascending: false })
-                    .limit(1);
-
-                const lastMsg = lastMsgs && lastMsgs[0] ? lastMsgs[0] : null;
-
+                const lastMsg = lastMsgsMap.get(conv.id);
                 const isMuted = membership ? !!membership.is_muted : false;
                 const hasUnread = lastMsg && lastMsg.sender_id !== user.id && 
                     (!membership?.last_read_at || new Date(lastMsg.sent_at || lastMsg.created_at) > new Date(membership.last_read_at));
@@ -111,6 +152,7 @@ class ChatService {
                     avatarUrl,
                     isOnline,
                     isMuted,
+                    isPinned: membership ? !!membership.is_pinned : false,
                     hasUnread,
                     isPrivacyMode: !!conv.is_privacy_mode || (membership ? !!membership.is_privacy_mode : false),
                     disappearingTimer: conv.disappearing_timer,
@@ -120,9 +162,7 @@ class ChatService {
                     lastMessageTime: lastMsg ? new Date(lastMsg.sent_at || lastMsg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '',
                     updatedAt: conv.updated_at
                 };
-            }));
-
-            return enriched;
+            });
         } catch (err) {
             console.error('[ChatService] getConversations error:', err);
             return [];
@@ -130,38 +170,53 @@ class ChatService {
     }
 
     /**
-     * Fetch message thread for a conversation
-     * Filters expired disappearing messages and maps sent, delivered, and read receipt statuses
+     * Fetch paginated message thread for a conversation
+     * Strict performance constraint: Never loads thousands of messages at once.
+     * Uses index (conversation_id, created_at DESC) and returns oldest-first array
      * @param {string} conversationId 
-     * @returns {Promise<Array>}
+     * @param {Object} [options]
+     * @param {number} [options.limit=40]
+     * @param {string|null} [options.before=null] - Cursor ISO timestamp for loading older history
+     * @returns {Promise<Array & { hasMore: boolean, oldestTimestamp: string|null }>}
      */
-    async getMessages(conversationId) {
+    async getMessages(conversationId, { limit = 40, before = null } = {}) {
         const user = await authService.getUser();
-        if (!user || !conversationId) return [];
+        if (!user || !conversationId) {
+            const empty = [];
+            empty.hasMore = false;
+            empty.oldestTimestamp = null;
+            return empty;
+        }
 
         try {
             const nowIso = new Date().toISOString();
-            const { data, error } = await supabase
+            let query = supabase
                 .from('messages')
-                .select('*')
+                .select('id, conversation_id, sender_id, ciphertext, message_type, sent_at, created_at, delivered_at, read_at, expires_at, is_deleted_for_all')
                 .eq('conversation_id', conversationId)
+                .eq('is_deleted_for_all', false)
                 .or(`expires_at.is.null,expires_at.gt.${nowIso}`)
-                .order('created_at', { ascending: true });
+                .order('created_at', { ascending: false })
+                .limit(limit);
 
-            if (error) {
-                console.error('[ChatService] getMessages error:', error);
-                return [];
+            if (before) {
+                query = query.lt('created_at', before);
             }
 
-            const now = Date.now();
-            const validMsgs = (data || []).filter(m => {
-                if (m.is_deleted_for_all) return false;
-                if (m.expires_at && new Date(m.expires_at).getTime() <= now) return false;
-                return true;
-            });
+            const { data, error } = await query;
+            if (error) {
+                console.error('[ChatService] getMessages error:', error);
+                const empty = [];
+                empty.hasMore = false;
+                empty.oldestTimestamp = null;
+                return empty;
+            }
 
-            // Fetch sender profile details for group chats
-            const senderIds = [...new Set(validMsgs.map(m => m.sender_id))];
+            const rawMsgs = data || [];
+            const hasMore = rawMsgs.length === limit;
+
+            // Fetch sender profile details in 1 batch query for group chats
+            const senderIds = [...new Set(rawMsgs.map(m => m.sender_id))];
             const profilesMap = new Map();
             if (senderIds.length > 0) {
                 const { data: profiles } = await supabase
@@ -171,14 +226,17 @@ class ChatService {
                 (profiles || []).forEach(p => profilesMap.set(p.id, p));
             }
 
-            return validMsgs.map(m => {
+            // Reverse to present chronological order (oldest to newest) in UI feed
+            const sorted = [...rawMsgs].reverse();
+            const oldestTs = rawMsgs.length > 0 ? (rawMsgs[rawMsgs.length - 1].created_at || rawMsgs[rawMsgs.length - 1].sent_at) : null;
+
+            const formatted = sorted.map(m => {
                 const isOutgoing = m.sender_id === user.id;
                 const sentAt = m.sent_at || m.created_at;
                 const deliveredAt = m.delivered_at;
                 const readAt = m.read_at;
                 const senderProfile = profilesMap.get(m.sender_id);
 
-                // Compute receipt state: 'sent' (1 tick) | 'delivered' (2 gray ticks) | 'read' (2 blue ticks)
                 let status = 'sent';
                 if (readAt) status = 'read';
                 else if (deliveredAt) status = 'delivered';
@@ -201,9 +259,16 @@ class ChatService {
                     messageType: m.message_type
                 };
             });
+
+            formatted.hasMore = hasMore;
+            formatted.oldestTimestamp = oldestTs;
+            return formatted;
         } catch (err) {
             console.error('[ChatService] getMessages exception:', err);
-            return [];
+            const empty = [];
+            empty.hasMore = false;
+            empty.oldestTimestamp = null;
+            return empty;
         }
     }
 
@@ -691,6 +756,70 @@ class ChatService {
         } catch (err) {
             console.error('[ChatService] getGroupDetails error:', err);
             return { success: false, error: err.message };
+        }
+    }
+
+    /**
+     * Get paginated group members list with search
+     * Avoids loading massive member arrays simultaneously
+     * @param {string} groupId 
+     * @param {Object} [options]
+     * @param {number} [options.limit=40]
+     * @param {number} [options.offset=0]
+     * @param {string} [options.search='']
+     * @returns {Promise<{ success: boolean, members: Array, total: number, error?: string }>}
+     */
+    async getGroupMembers(groupId, { limit = 40, offset = 0, search = '' } = {}) {
+        if (!groupId) return { success: false, members: [], total: 0 };
+        try {
+            // 1. Try RPC get_group_members_paginated
+            const { data: rpcData, error: rpcErr } = await supabase.rpc('get_group_members_paginated', {
+                p_group_id: groupId,
+                p_limit: limit,
+                p_offset: offset,
+                p_search: (search || '').trim() || null
+            });
+
+            if (!rpcErr && rpcData?.success) {
+                return rpcData;
+            }
+
+            // 2. Fallback direct table query
+            let query = supabase
+                .from('group_members')
+                .select(`
+                    user_id, role, joined_at,
+                    profiles:user_id (id, username, display_name, avatar_url, last_seen_at)
+                `, { count: 'exact' })
+                .eq('group_id', groupId)
+                .range(offset, offset + limit - 1)
+                .order('joined_at', { ascending: true });
+
+            const { data, count, error } = await query;
+            if (error) throw error;
+
+            let members = (data || []).map(m => {
+                const p = m.profiles || {};
+                return {
+                    user_id: m.user_id,
+                    role: m.role,
+                    joined_at: m.joined_at,
+                    username: p.username || 'user',
+                    display_name: p.display_name || p.username || 'User',
+                    avatar_url: p.avatar_url || '',
+                    last_seen_at: p.last_seen_at
+                };
+            });
+
+            if (search) {
+                const q = search.toLowerCase();
+                members = members.filter(m => m.username.toLowerCase().includes(q) || m.display_name.toLowerCase().includes(q));
+            }
+
+            return { success: true, members, total: count || members.length };
+        } catch (err) {
+            console.error('[ChatService] getGroupMembers error:', err);
+            return { success: false, members: [], total: 0, error: err.message };
         }
     }
 

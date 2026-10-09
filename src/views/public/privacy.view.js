@@ -40,7 +40,7 @@ export const PrivacyView = {
                         <h2 style="color: var(--text-primary); font-size: 1.15rem; font-weight: 700; margin-bottom: 0.5rem;">2. Information We Collect (and Do NOT Collect)</h2>
                         <p><strong>What We Collect:</strong></p>
                         <ul style="padding-left: 1.5rem; margin-top: 0.5rem; display: flex; flex-direction: column; gap: 0.35rem;">
-                            <li><strong>Account Identifiers:</strong> Display name, unique username handle (`@username`), birth date (for age verification), and private email.</li>
+                            <li><strong>Account Identifiers:</strong> Display name, unique username handle (@username), birth date (for age verification), and private email.</li>
                             <li><strong>Identity Media:</strong> Profile avatar and cover banner images uploaded voluntarily.</li>
                             <li><strong>Encrypted Text Messages:</strong> Text chat messages protected by Row-Level Security.</li>
                             <li><strong>Security Hashes:</strong> One-way cryptographic hashes of session tokens and IP addresses for brute-force prevention and session verification.</li>

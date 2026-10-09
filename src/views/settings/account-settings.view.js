@@ -27,6 +27,7 @@ export const AccountSettingsView = {
         const bannerUrl = profile.banner_url || '';
         const bio = profile.bio || 'Good vibes only.';
         const birthDate = profile.birth_date || 'Kept Strictly Private';
+        const defaultBanner = 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="100" height="100"%3E%3Crect width="100" height="100" fill="%231e293b"/%3E%3C/svg%3E';
 
         const contentHtml = `
             <div style="max-width: 650px; display: flex; flex-direction: column; gap: 1.5rem;">
@@ -41,7 +42,7 @@ export const AccountSettingsView = {
                     
                     <!-- Cover Banner with Overlay -->
                     <div style="position: relative; height: 120px; border-radius: var(--radius-md); overflow: hidden; background: linear-gradient(135deg, #1e293b, #0f172a); margin-bottom: 2.75rem; border: 1px solid var(--border-color);">
-                        <img id="cover-preview-img" src="${bannerUrl || 'data:image/svg+xml,%3Csvg xmlns=\\'http://www.w3.org/2000/svg\\' width=\\'100\\' height=\\'100\\'%3E%3Crect width=\\'100\\' height=\\'100\\' fill=\\'%231e293b\\'/%3E%3C/svg%3E'}" style="width: 100%; height: 100%; object-fit: cover;" alt="Cover" />
+                        <img id="cover-preview-img" src="${bannerUrl || defaultBanner}" style="width: 100%; height: 100%; object-fit: cover;" alt="Cover" />
                         <label for="cover-file-input" style="position: absolute; right: 0.75rem; bottom: 0.75rem; background: rgba(0,0,0,0.65); color: #fff; padding: 0.35rem 0.65rem; border-radius: var(--radius-sm); font-size: 0.75rem; cursor: pointer; backdrop-filter: blur(4px);">
                             📷 Change Cover
                         </label>

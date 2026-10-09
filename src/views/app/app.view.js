@@ -13,6 +13,7 @@ import { notificationService, NOTIFICATION_TYPES } from '../../services/notifica
 import { CONFIG } from '../../config.js';
 import { supabase } from '../../core/supabase.js';
 import { router } from '../../core/router.js';
+import { debounce, throttle } from '../../core/utils.js';
 
 export const AppView = {
     state: {
@@ -37,7 +38,12 @@ export const AppView = {
         typingMap: new Map(),
         isLoadingConversations: true,
         isLoadingMessages: false,
-        isLoadingNotifications: false
+        isLoadingNotifications: false,
+        hasMoreMessages: false,
+        oldestMessageTimestamp: null,
+        isLoadingOlderMessages: false,
+        notificationsOffset: 0,
+        hasMoreNotifications: false
     },
 
     unsubscribeRealtime: null,
@@ -49,15 +55,23 @@ export const AppView = {
         container.id = 'app-main-shell';
 
         // Load authenticated user profile
-        this.state.currentUser = await authService.getUser();
-        if (this.state.currentUser) {
-            const profileRes = await profileService.getProfile({ userId: this.state.currentUser.id });
-            this.state.currentProfile = profileRes.profile || null;
-            this.state.stats = {
-                friendsCount: this.state.currentProfile?.friends_count || 0,
-                groupsCount: this.state.currentProfile?.groups_count || 0,
-                joinedDate: this.state.currentProfile?.joinedDateFormatted || '2026'
-            };
+        try {
+            if (!this.state.currentUser) {
+                this.state.currentUser = await authService.getUser();
+            }
+            if (this.state.currentUser && !this.state.currentProfile) {
+                const profileRes = await profileService.getProfile({ userId: this.state.currentUser.id });
+                this.state.currentProfile = profileRes.profile || null;
+            }
+            if (this.state.currentProfile) {
+                this.state.stats = {
+                    friendsCount: this.state.currentProfile?.friends_count || 0,
+                    groupsCount: this.state.currentProfile?.groups_count || 0,
+                    joinedDate: this.state.currentProfile?.joinedDateFormatted || '2026'
+                };
+            }
+        } catch (authErr) {
+            console.warn('[AppView] Profile bootstrap warning:', authErr);
         }
 
         // Determine active tab from URL hash
@@ -355,6 +369,14 @@ export const AppView = {
                 </a>
             </nav>
 
+            <!-- Realtime & Offline Connection Status Banner -->
+            <div id="connection-status-banner" class="connection-status-banner" style="display: none;" role="status" aria-live="polite">
+                <div class="connection-status-inner">
+                    <span class="connection-status-icon" id="connection-status-icon">⚡</span>
+                    <span class="connection-status-text" id="connection-status-text">Reconnecting...</span>
+                </div>
+            </div>
+
             <!-- Privacy Toast Container -->
             <div id="privacy-toast-container" class="privacy-toast-container" aria-live="polite"></div>
 
@@ -398,10 +420,9 @@ export const AppView = {
             this.cycleTheme();
         });
 
-        // Mobile Chat Back Button
+        // Mobile Chat Back Button — Closes active conversation and unsubscribes channel
         root.querySelector('#btn-mobile-chat-back').addEventListener('click', () => {
-            root.classList.remove('in-chat');
-            this.state.activeConversation = null;
+            this.closeActiveConversation(root);
         });
 
         // New Chat Buttons
@@ -417,6 +438,11 @@ export const AppView = {
             if (!this.state.activeConversation) return;
             const text = textInput.value.trim();
             if (!text) return;
+
+            if (typeof navigator !== 'undefined' && !navigator.onLine) {
+                this.showPrivacyToast('Cannot send message while offline. Waiting for connection...');
+                return;
+            }
 
             textInput.value = '';
             sendBtn.disabled = true;
@@ -467,13 +493,18 @@ export const AppView = {
             }
         });
 
+        let lastTypingBroadcast = 0;
         textInput.addEventListener('input', () => {
             if (!this.state.activeConversation || !this.state.currentUser) return;
-            realtimeService.broadcastTyping(this.state.activeConversation.id, {
-                userId: this.state.currentUser.id,
-                username: this.state.currentProfile?.username || 'user',
-                isTyping: true
-            });
+            const now = Date.now();
+            if (now - lastTypingBroadcast > 2000) {
+                lastTypingBroadcast = now;
+                realtimeService.broadcastTyping(this.state.activeConversation.id, {
+                    userId: this.state.currentUser.id,
+                    username: this.state.currentProfile?.username || 'user',
+                    isTyping: true
+                });
+            }
             clearTimeout(typingDebounce);
             typingDebounce = setTimeout(() => {
                 if (this.state.activeConversation && this.state.currentUser) {
@@ -510,12 +541,16 @@ export const AppView = {
             }
         });
 
-        // Search Input Filter
+        // Search Input Filter (Debounced to avoid rapid filter churn)
         const searchInput = root.querySelector('#sidebar-search-input');
-        searchInput.addEventListener('input', () => {
-            const query = searchInput.value.trim().toLowerCase();
-            this.filterSidebarItems(root, query);
-        });
+        if (searchInput) {
+            const debouncedSidebarFilter = debounce((query) => {
+                this.filterSidebarItems(root, query);
+            }, 200);
+            searchInput.addEventListener('input', (e) => {
+                debouncedSidebarFilter(e.target.value.trim().toLowerCase());
+            });
+        }
 
         // -------------------------------------------------------------
         // Privacy Chat Mode Toggle & Info Modal
@@ -654,6 +689,11 @@ export const AppView = {
             window.location.hash = `#/${tab}`;
         }
 
+        // Clean up active chat when leaving chats tab on mobile
+        if (tab !== 'chats' && root.classList.contains('in-chat')) {
+            this.closeActiveConversation(root);
+        }
+
         // Update Desktop Sidebar Pills
         root.querySelectorAll('.nav-pill-btn').forEach(btn => {
             btn.classList.toggle('active', btn.dataset.tab === tab);
@@ -727,11 +767,14 @@ export const AppView = {
         root.querySelector('#sidebar-section-title').textContent = 'Recent Chats';
 
         if (this.state.conversations.length === 0) {
+            const isOffline = typeof navigator !== 'undefined' && !navigator.onLine;
             listContainer.innerHTML = `
                 <div class="empty-state-box">
-                    <div class="empty-state-icon">💬</div>
-                    <h3 class="empty-state-title">No conversations yet</h3>
-                    <p class="empty-state-desc">Search for a username above to start your first secure text chat.</p>
+                    <div class="empty-state-icon">${isOffline ? '📡' : '💬'}</div>
+                    <h3 class="empty-state-title">${isOffline ? 'Offline Mode' : 'No conversations yet'}</h3>
+                    <p class="empty-state-desc">${isOffline 
+                        ? 'You are currently offline. Connect to the internet to load and sync your private text chats.' 
+                        : 'Search for a username above to start your first secure text chat.'}</p>
                 </div>
             `;
             return;
@@ -750,15 +793,16 @@ export const AppView = {
 
             const isTyping = this.state.typingMap.get(conv.id);
 
+            const convTitle = conv.title || conv.name || 'Chat';
             item.innerHTML = `
                 <div class="avatar-wrapper">
-                    ${conv.avatarUrl ? `<img src="${conv.avatarUrl}" alt="${conv.title}" />` : `<span>${conv.title.charAt(0).toUpperCase()}</span>`}
+                    ${conv.avatarUrl ? `<img src="${conv.avatarUrl}" alt="${convTitle}" loading="lazy" decoding="async" />` : `<span>${convTitle.charAt(0).toUpperCase()}</span>`}
                     ${conv.isOnline ? `<div class="online-indicator"></div>` : ''}
                 </div>
                 <div class="chat-item-content">
                     <div class="chat-item-top">
                         <div style="display: flex; align-items: center; gap: 0.35rem; min-width: 0;">
-                            <span class="chat-item-name">${conv.type === 'group' ? '👥 ' : ''}${conv.title}</span>
+                            <span class="chat-item-name">${conv.type === 'group' ? '👥 ' : ''}${convTitle}</span>
                             ${conv.isMuted ? `<span class="muted-badge-icon" title="Muted">🔕</span>` : ''}
                         </div>
                         <span class="chat-item-time">${conv.lastMessageTime}</span>
@@ -788,6 +832,57 @@ export const AppView = {
             } else {
                 badgeChats.style.display = 'none';
             }
+        }
+    },
+
+    /**
+     * Close active conversation and release realtime channel & timers
+     */
+    closeActiveConversation(root) {
+        if (this.activeConvUnsubscribe) {
+            this.activeConvUnsubscribe();
+            this.activeConvUnsubscribe = null;
+        }
+        if (this.disappearingTimerInterval) {
+            clearInterval(this.disappearingTimerInterval);
+            this.disappearingTimerInterval = null;
+        }
+        this.state.activeConversation = null;
+        this.state.hasMoreMessages = false;
+        this.state.oldestMessageTimestamp = null;
+        this.state.isLoadingOlderMessages = false;
+
+        if (root) {
+            root.classList.remove('in-chat');
+            const backBtn = root.querySelector('#btn-mobile-chat-back');
+            if (backBtn) backBtn.style.display = 'none';
+            const actions = root.querySelector('#chat-header-actions');
+            if (actions) actions.style.display = 'none';
+            const inputContainer = root.querySelector('#chat-input-container');
+            if (inputContainer) inputContainer.style.display = 'none';
+            const nameEl = root.querySelector('#chat-header-name');
+            if (nameEl) nameEl.textContent = 'Select a conversation';
+            const statusEl = root.querySelector('#chat-header-status');
+            if (statusEl) statusEl.textContent = 'Connect Privately. Chat Freely.';
+            const avatarBox = root.querySelector('#chat-header-avatar');
+            if (avatarBox) avatarBox.innerHTML = `<span>💬</span>`;
+            const banner = root.querySelector('#chat-ephemeral-banner');
+            if (banner) banner.style.display = 'none';
+            const feed = root.querySelector('#messages-feed');
+            if (feed) {
+                feed.innerHTML = `
+                    <div class="empty-state-box" id="empty-thread-placeholder">
+                        <div class="empty-state-icon">💬</div>
+                        <h3 class="empty-state-title">No conversation selected</h3>
+                        <p class="empty-state-desc">Choose a conversation from the left or start a new private text chat.</p>
+                        <button type="button" id="btn-start-chat-prompt" class="btn-primary" style="max-width: 180px; min-height: 38px; font-size: 0.875rem;">
+                            New Message
+                        </button>
+                    </div>
+                `;
+                feed.querySelector('#btn-start-chat-prompt')?.addEventListener('click', () => this.showNewChatModal(root));
+            }
+            root.querySelectorAll('.chat-item').forEach(el => el.classList.remove('active'));
         }
     },
 
@@ -828,7 +923,7 @@ export const AppView = {
 
         const avatarBox = root.querySelector('#chat-header-avatar');
         avatarBox.innerHTML = conv.avatarUrl ? 
-            `<img src="${conv.avatarUrl}" alt="${conv.title}" />` : 
+            `<img src="${conv.avatarUrl}" alt="${conv.title}" loading="lazy" decoding="async" />` : 
             `<span>${conv.title.charAt(0).toUpperCase()}</span>`;
 
         // Update Ephemeral Banner
@@ -953,18 +1048,52 @@ export const AppView = {
     },
 
     /**
-     * Load messages into center feed
+     * Create message DOM element
+     */
+    createMessageElement(m) {
+        const row = document.createElement('div');
+        row.className = `message-row ${m.isOutgoing ? 'outgoing' : 'incoming'}`;
+        row.setAttribute('data-msg-id', m.id);
+        if (m.expiresAt) {
+            row.setAttribute('data-expires-at', m.expiresAt);
+        }
+
+        const isGroup = this.state.activeConversation?.type === 'group';
+        row.innerHTML = `
+            <div class="message-bubble">
+                ${!m.isOutgoing && isGroup ? `
+                    <div class="group-sender-header">
+                        <span>@${this.escapeHtml(m.senderUsername || 'user')}</span>
+                    </div>
+                ` : ''}
+                ${this.escapeHtml(m.text)}
+            </div>
+            <div class="message-meta">
+                ${m.expiresAt ? `<span class="expires-indicator" title="Disappearing message">⏳</span>` : ''}
+                <span>${m.timeFormatted || (m.sentAt ? new Date(m.sentAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '')}</span>
+                ${m.isOutgoing ? this.getReadTicksHtml(m.status) : ''}
+            </div>
+        `;
+        return row;
+    },
+
+    /**
+     * Load messages into center feed (Enforces limit 40 & cursor pagination)
      */
     async loadMessages(root, conversationId) {
         const feed = root.querySelector('#messages-feed');
+        if (!feed) return;
+
         feed.innerHTML = `
             <div class="empty-state-box">
                 <span class="spinner" style="border-top-color: var(--accent);"></span>
             </div>
         `;
 
-        const msgs = await chatService.getMessages(conversationId);
+        const msgs = await chatService.getMessages(conversationId, { limit: 40 });
         this.state.messages = msgs;
+        this.state.hasMoreMessages = !!msgs.hasMore;
+        this.state.oldestMessageTimestamp = msgs.oldestTimestamp || null;
 
         if (msgs.length === 0) {
             feed.innerHTML = `
@@ -978,36 +1107,98 @@ export const AppView = {
         }
 
         feed.innerHTML = '';
+        const fragment = document.createDocumentFragment();
+
+        if (this.state.hasMoreMessages) {
+            const banner = document.createElement('div');
+            banner.id = 'load-older-messages-banner';
+            banner.className = 'load-older-banner';
+            banner.innerHTML = `<button type="button" class="btn-load-older" id="btn-load-older-messages">Load earlier messages</button>`;
+            banner.querySelector('#btn-load-older-messages').addEventListener('click', () => {
+                this.loadOlderMessages(root, conversationId);
+            });
+            fragment.appendChild(banner);
+        }
+
         msgs.forEach(m => {
-            const row = document.createElement('div');
-            row.className = `message-row ${m.isOutgoing ? 'outgoing' : 'incoming'}`;
-            row.setAttribute('data-msg-id', m.id);
-            if (m.expiresAt) {
-                row.setAttribute('data-expires-at', m.expiresAt);
-            }
-
-            const isGroup = this.state.activeConversation?.type === 'group';
-            row.innerHTML = `
-                <div class="message-bubble">
-                    ${!m.isOutgoing && isGroup ? `
-                        <div class="group-sender-header">
-                            <span>@${this.escapeHtml(m.senderUsername || 'user')}</span>
-                        </div>
-                    ` : ''}
-                    ${this.escapeHtml(m.text)}
-                </div>
-                <div class="message-meta">
-                    ${m.expiresAt ? `<span class="expires-indicator" title="Disappearing message">⏳</span>` : ''}
-                    <span>${m.timeFormatted}</span>
-                    ${m.isOutgoing ? this.getReadTicksHtml(m.status) : ''}
-                </div>
-            `;
-
-            feed.appendChild(row);
+            fragment.appendChild(this.createMessageElement(m));
         });
 
-        // Scroll to bottom
+        feed.appendChild(fragment);
         feed.scrollTop = feed.scrollHeight;
+
+        // Attach infinite scroll listener (throttled to avoid scroll event spam)
+        if (!feed._hasScrollListener) {
+            feed._hasScrollListener = true;
+            const checkScroll = throttle(() => {
+                if (feed.scrollTop < 60 && this.state.hasMoreMessages && !this.state.isLoadingOlderMessages && this.state.activeConversation) {
+                    this.loadOlderMessages(root, this.state.activeConversation.id);
+                }
+            }, 250);
+            feed.addEventListener('scroll', checkScroll);
+        }
+    },
+
+    /**
+     * Load earlier messages page via cursor pagination
+     */
+    async loadOlderMessages(root, conversationId) {
+        if (this.state.isLoadingOlderMessages || !this.state.hasMoreMessages || !this.state.oldestMessageTimestamp) return;
+        this.state.isLoadingOlderMessages = true;
+
+        const feed = root.querySelector('#messages-feed');
+        const loadBtn = feed?.querySelector('#btn-load-older-messages');
+        if (loadBtn) {
+            loadBtn.textContent = 'Loading earlier messages...';
+            loadBtn.disabled = true;
+        }
+
+        try {
+            const olderMsgs = await chatService.getMessages(conversationId, {
+                limit: 40,
+                before: this.state.oldestMessageTimestamp
+            });
+
+            this.state.hasMoreMessages = !!olderMsgs.hasMore;
+            this.state.oldestMessageTimestamp = olderMsgs.oldestTimestamp || null;
+
+            if (olderMsgs.length > 0 && feed) {
+                const prevScrollHeight = feed.scrollHeight;
+                const prevScrollTop = feed.scrollTop;
+
+                feed.querySelector('#load-older-messages-banner')?.remove();
+
+                const fragment = document.createDocumentFragment();
+                if (this.state.hasMoreMessages) {
+                    const banner = document.createElement('div');
+                    banner.id = 'load-older-messages-banner';
+                    banner.className = 'load-older-banner';
+                    banner.innerHTML = `<button type="button" class="btn-load-older" id="btn-load-older-messages">Load earlier messages</button>`;
+                    banner.querySelector('#btn-load-older-messages').addEventListener('click', () => {
+                        this.loadOlderMessages(root, conversationId);
+                    });
+                    fragment.appendChild(banner);
+                }
+
+                olderMsgs.forEach(m => {
+                    fragment.appendChild(this.createMessageElement(m));
+                });
+
+                feed.insertBefore(fragment, feed.firstChild);
+
+                // Preserve scroll position so reading isn't interrupted
+                const newScrollHeight = feed.scrollHeight;
+                feed.scrollTop = prevScrollTop + (newScrollHeight - prevScrollHeight);
+
+                this.state.messages = [...olderMsgs, ...this.state.messages];
+            } else {
+                feed.querySelector('#load-older-messages-banner')?.remove();
+            }
+        } catch (err) {
+            console.error('[AppView] Error loading older messages:', err);
+        } finally {
+            this.state.isLoadingOlderMessages = false;
+        }
     },
 
     /**
@@ -1037,29 +1228,7 @@ export const AppView = {
         // Avoid duplicate message DOM elements
         if (feed.querySelector(`[data-msg-id="${m.id}"]`)) return;
 
-        const row = document.createElement('div');
-        row.className = `message-row ${m.isOutgoing ? 'outgoing' : 'incoming'}`;
-        row.setAttribute('data-msg-id', m.id);
-        if (m.expiresAt) {
-            row.setAttribute('data-expires-at', m.expiresAt);
-        }
-
-        const isGroup = this.state.activeConversation?.type === 'group';
-        row.innerHTML = `
-            <div class="message-bubble">
-                ${!m.isOutgoing && isGroup ? `
-                    <div class="group-sender-header">
-                        <span>@${this.escapeHtml(m.senderUsername || 'user')}</span>
-                    </div>
-                ` : ''}
-                ${this.escapeHtml(m.text)}
-            </div>
-            <div class="message-meta">
-                ${m.expiresAt ? `<span class="expires-indicator" title="Disappearing message">⏳</span>` : ''}
-                <span>${m.timeFormatted}</span>
-                ${m.isOutgoing ? this.getReadTicksHtml(m.status) : ''}
-            </div>
-        `;
+        const row = this.createMessageElement(m);
 
         // If typing indicator is active at bottom, insert before it
         const typingEl = feed.querySelector('#feed-typing-indicator');
@@ -1069,7 +1238,10 @@ export const AppView = {
             feed.appendChild(row);
         }
 
-        feed.scrollTop = feed.scrollHeight;
+        const isNearBottom = (feed.scrollHeight - feed.scrollTop - feed.clientHeight) < 120;
+        if (m.isOutgoing || isNearBottom) {
+            feed.scrollTop = feed.scrollHeight;
+        }
     },
 
     /**
@@ -1251,7 +1423,7 @@ export const AppView = {
 
         const avatarBox = root.querySelector('#info-avatar-box');
         if (conv.avatarUrl) {
-            avatarBox.innerHTML = `<img src="${conv.avatarUrl}" alt="${conv.title}" />`;
+            avatarBox.innerHTML = `<img src="${conv.avatarUrl}" alt="${conv.title}" loading="lazy" decoding="async" />`;
         } else {
             avatarBox.innerHTML = `<span>${conv.title.charAt(0).toUpperCase()}</span>`;
         }
@@ -1304,7 +1476,7 @@ export const AppView = {
 
                 if (friendsCountEl) friendsCountEl.textContent = String(members.length);
                 if (groupData.avatar_url) {
-                    avatarBox.innerHTML = `<img src="${groupData.avatar_url}" alt="${conv.title}" />`;
+                    avatarBox.innerHTML = `<img src="${groupData.avatar_url}" alt="${conv.title}" loading="lazy" decoding="async" />`;
                 }
 
                 // Show Group Members Container
@@ -1320,6 +1492,7 @@ export const AppView = {
 
                     const listEl = root.querySelector('#info-group-members-list');
                     listEl.innerHTML = '';
+                    const membersFragment = document.createDocumentFragment();
 
                     members.forEach(m => {
                         const isSelf = m.user_id === this.state.currentUser?.id;
@@ -1331,7 +1504,7 @@ export const AppView = {
                         item.innerHTML = `
                             <div class="group-member-info">
                                 <div class="group-member-avatar">
-                                    ${m.avatar_url ? `<img src="${m.avatar_url}" alt="${m.username}" />` : `<span>${(m.username || 'U').charAt(0).toUpperCase()}</span>`}
+                                    ${m.avatar_url ? `<img src="${m.avatar_url}" alt="${m.username}" loading="lazy" decoding="async" />` : `<span>${(m.username || 'U').charAt(0).toUpperCase()}</span>`}
                                 </div>
                                 <div class="group-member-text">
                                     <div class="group-member-name">${this.escapeHtml(m.display_name || m.username)} ${isSelf ? '<span style="font-weight: 400; opacity: 0.7;">(You)</span>' : ''}</div>
@@ -1410,8 +1583,9 @@ export const AppView = {
                             }
                         }
 
-                        listEl.appendChild(item);
+                        membersFragment.appendChild(item);
                     });
+                    listEl.appendChild(membersFragment);
                 }
 
                 // Show/hide Group Action Rows
@@ -1507,7 +1681,7 @@ export const AppView = {
                     item.className = 'chat-item';
                     item.innerHTML = `
                         <div class="avatar-wrapper">
-                            ${g.avatarUrl ? `<img src="${g.avatarUrl}" alt="${g.title}" />` : `<span>${g.title.charAt(0).toUpperCase()}</span>`}
+                            ${g.avatarUrl ? `<img src="${g.avatarUrl}" alt="${g.title}" loading="lazy" decoding="async" />` : `<span>${g.title.charAt(0).toUpperCase()}</span>`}
                         </div>
                         <div class="chat-item-content">
                             <div class="chat-item-top">
@@ -1530,6 +1704,7 @@ export const AppView = {
             const stats = this.state.stats;
             const displayName = p.display_name || 'User';
             const username = p.username || 'username';
+            const defaultBannerUri = 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="100" height="100"%3E%3Crect width="100" height="100" fill="%231e293b"/%3E%3C/svg%3E';
 
             list.innerHTML = `
                 <div class="profile-view-scroll">
@@ -1537,7 +1712,7 @@ export const AppView = {
                     <div class="profile-cover-banner">
                         <img 
                             id="profile-view-banner-img" 
-                            src="${p.banner_url || 'data:image/svg+xml,%3Csvg xmlns=\\'http://www.w3.org/2000/svg\\' width=\\'100\\' height=\\'100\\'%3E%3Crect width=\\'100\\' height=\\'100\\' fill=\\'%231e293b\\'/%3E%3C/svg%3E'}" 
+                            src="${p.banner_url || defaultBannerUri}" 
                             alt="Cover" 
                         />
                         <button type="button" class="profile-banner-upload-btn" id="btn-change-banner-upload" title="Change Cover Banner">
@@ -2023,13 +2198,14 @@ export const AppView = {
         }
 
         container.innerHTML = '';
+        const fragment = document.createDocumentFragment();
         this.state.friends.forEach(f => {
             const row = document.createElement('div');
             row.className = 'friend-item-row';
             row.innerHTML = `
                 <div class="friend-item-avatar-col">
                     <div class="avatar-wrapper">
-                        ${f.avatar_url ? `<img src="${f.avatar_url}" alt="${this.escapeHtml(f.display_name)}" />` : `<span>${f.display_name.charAt(0).toUpperCase()}</span>`}
+                        ${f.avatar_url ? `<img src="${f.avatar_url}" alt="${this.escapeHtml(f.display_name)}" loading="lazy" decoding="async" />` : `<span>${f.display_name.charAt(0).toUpperCase()}</span>`}
                         ${f.is_online ? `<div class="online-indicator"></div>` : ''}
                     </div>
                 </div>
@@ -2064,8 +2240,9 @@ export const AppView = {
                 this.showFriendOptionsModal(root, f);
             });
 
-            container.appendChild(row);
+            fragment.appendChild(row);
         });
+        container.appendChild(fragment);
     },
 
     /**
@@ -2084,13 +2261,14 @@ export const AppView = {
         }
 
         container.innerHTML = '';
+        const incomingFragment = document.createDocumentFragment();
         this.state.pendingIncoming.forEach(r => {
             const row = document.createElement('div');
             row.className = 'friend-item-row';
             row.innerHTML = `
                 <div class="friend-item-avatar-col">
                     <div class="avatar-wrapper">
-                        ${r.avatar_url ? `<img src="${r.avatar_url}" alt="${this.escapeHtml(r.display_name)}" />` : `<span>${r.display_name.charAt(0).toUpperCase()}</span>`}
+                        ${r.avatar_url ? `<img src="${r.avatar_url}" alt="${this.escapeHtml(r.display_name)}" loading="lazy" decoding="async" />` : `<span>${r.display_name.charAt(0).toUpperCase()}</span>`}
                     </div>
                 </div>
                 <div class="friend-item-info">
@@ -2126,8 +2304,9 @@ export const AppView = {
                 }
             });
 
-            container.appendChild(row);
+            incomingFragment.appendChild(row);
         });
+        container.appendChild(incomingFragment);
     },
 
     /**
@@ -2146,13 +2325,14 @@ export const AppView = {
         }
 
         container.innerHTML = '';
+        const outgoingFragment = document.createDocumentFragment();
         this.state.pendingOutgoing.forEach(r => {
             const row = document.createElement('div');
             row.className = 'friend-item-row';
             row.innerHTML = `
                 <div class="friend-item-avatar-col">
                     <div class="avatar-wrapper">
-                        ${r.avatar_url ? `<img src="${r.avatar_url}" alt="${this.escapeHtml(r.display_name)}" />` : `<span>${r.display_name.charAt(0).toUpperCase()}</span>`}
+                        ${r.avatar_url ? `<img src="${r.avatar_url}" alt="${this.escapeHtml(r.display_name)}" loading="lazy" decoding="async" />` : `<span>${r.display_name.charAt(0).toUpperCase()}</span>`}
                     </div>
                 </div>
                 <div class="friend-item-info">
@@ -2176,8 +2356,9 @@ export const AppView = {
                 }
             });
 
-            container.appendChild(row);
+            outgoingFragment.appendChild(row);
         });
+        container.appendChild(outgoingFragment);
     },
 
     /**
@@ -2232,13 +2413,14 @@ export const AppView = {
                 }
 
                 resultsBox.innerHTML = '';
+                const searchFragment = document.createDocumentFragment();
                 users.forEach(u => {
                     const row = document.createElement('div');
                     row.className = 'friend-item-row';
                     row.innerHTML = `
                         <div class="friend-item-avatar-col">
                             <div class="avatar-wrapper">
-                                ${u.avatar_url ? `<img src="${u.avatar_url}" alt="${this.escapeHtml(u.display_name)}" />` : `<span>${u.display_name.charAt(0).toUpperCase()}</span>`}
+                                ${u.avatar_url ? `<img src="${u.avatar_url}" alt="${this.escapeHtml(u.display_name)}" loading="lazy" decoding="async" />` : `<span>${u.display_name.charAt(0).toUpperCase()}</span>`}
                             </div>
                         </div>
                         <div class="friend-item-info">
@@ -2321,8 +2503,9 @@ export const AppView = {
                         });
                     }
 
-                    resultsBox.appendChild(row);
+                    searchFragment.appendChild(row);
                 });
+                resultsBox.appendChild(searchFragment);
             }, 300);
         };
 
@@ -2350,13 +2533,14 @@ export const AppView = {
         }
 
         container.innerHTML = '';
+        const blockedFragment = document.createDocumentFragment();
         this.state.blockedUsers.forEach(b => {
             const row = document.createElement('div');
             row.className = 'friend-item-row';
             row.innerHTML = `
                 <div class="friend-item-avatar-col">
                     <div class="avatar-wrapper">
-                        ${b.avatar_url ? `<img src="${b.avatar_url}" alt="${this.escapeHtml(b.display_name)}" />` : `<span>${b.display_name.charAt(0).toUpperCase()}</span>`}
+                        ${b.avatar_url ? `<img src="${b.avatar_url}" alt="${this.escapeHtml(b.display_name)}" loading="lazy" decoding="async" />` : `<span>${b.display_name.charAt(0).toUpperCase()}</span>`}
                     </div>
                 </div>
                 <div class="friend-item-info">
@@ -2386,8 +2570,9 @@ export const AppView = {
                 });
             });
 
-            container.appendChild(row);
+            blockedFragment.appendChild(row);
         });
+        container.appendChild(blockedFragment);
     },
 
     /**
@@ -2731,9 +2916,11 @@ export const AppView = {
             }
         });
 
-        // Fetch notifications from service
+        // Fetch notifications from service (Paginated: limit 25)
         const notifRes = await notificationService.getNotifications({
-            unreadOnly: filter === 'unread'
+            unreadOnly: filter === 'unread',
+            limit: 25,
+            offset: 0
         });
 
         const body = list.querySelector('#notif-list-body');
@@ -2756,6 +2943,8 @@ export const AppView = {
 
         const items = notifRes.notifications || [];
         this.state.notifications = items;
+        this.state.notificationsOffset = items.length;
+        this.state.hasMoreNotifications = items.length === 25;
 
         if (items.length === 0) {
             body.innerHTML = `
@@ -2769,92 +2958,155 @@ export const AppView = {
         }
 
         body.innerHTML = '';
+        const fragment = document.createDocumentFragment();
         items.forEach(item => {
-            const card = document.createElement('article');
-            card.className = `notif-card ${item.isRead ? 'read' : 'unread'}`;
-            card.dataset.id = item.id;
-            card.tabIndex = 0;
-            card.setAttribute('role', 'button');
-            card.setAttribute('aria-label', `${item.title}: ${item.body}`);
+            fragment.appendChild(this.createNotificationCard(root, item));
+        });
+        body.appendChild(fragment);
 
-            card.innerHTML = `
-                <div class="notif-card-icon ${item.iconClass || 'notif-icon-default'}" aria-hidden="true">
-                    ${item.icon || '🔔'}
+        if (this.state.hasMoreNotifications) {
+            this.appendLoadMoreNotificationsButton(root, body);
+        }
+    },
+
+    appendLoadMoreNotificationsButton(root, body) {
+        body.querySelector('#notif-load-more-box')?.remove();
+        const btnBox = document.createElement('div');
+        btnBox.id = 'notif-load-more-box';
+        btnBox.style.cssText = 'padding: 1rem; text-align: center;';
+        btnBox.innerHTML = `
+            <button type="button" id="btn-load-more-notifs" class="btn-secondary" style="font-size: 0.85rem; min-height: 36px; width: 100%;">
+                Load More Notifications
+            </button>
+        `;
+        btnBox.querySelector('#btn-load-more-notifs').addEventListener('click', async (e) => {
+            e.target.disabled = true;
+            e.target.textContent = 'Loading...';
+            await this.loadMoreNotifications(root);
+        });
+        body.appendChild(btnBox);
+    },
+
+    async loadMoreNotifications(root) {
+        const filter = this.state.activeNotificationsFilter || 'all';
+        const notifRes = await notificationService.getNotifications({
+            unreadOnly: filter === 'unread',
+            limit: 25,
+            offset: this.state.notificationsOffset || 0
+        });
+
+        const body = root.querySelector('#notif-list-body');
+        const btnBox = body?.querySelector('#notif-load-more-box');
+
+        if (!notifRes.success || !notifRes.notifications?.length) {
+            this.state.hasMoreNotifications = false;
+            btnBox?.remove();
+            return;
+        }
+
+        const newItems = notifRes.notifications;
+        this.state.notifications = [...this.state.notifications, ...newItems];
+        this.state.notificationsOffset = (this.state.notificationsOffset || 0) + newItems.length;
+        this.state.hasMoreNotifications = newItems.length === 25;
+
+        btnBox?.remove();
+
+        const fragment = document.createDocumentFragment();
+        newItems.forEach(item => {
+            fragment.appendChild(this.createNotificationCard(root, item));
+        });
+        body.appendChild(fragment);
+
+        if (this.state.hasMoreNotifications) {
+            this.appendLoadMoreNotificationsButton(root, body);
+        }
+    },
+
+    createNotificationCard(root, item) {
+        const card = document.createElement('article');
+        card.className = `notif-card ${item.isRead ? 'read' : 'unread'}`;
+        card.dataset.id = item.id;
+        card.tabIndex = 0;
+        card.setAttribute('role', 'button');
+        card.setAttribute('aria-label', `${item.title}: ${item.body}`);
+
+        card.innerHTML = `
+            <div class="notif-card-icon ${item.iconClass || 'notif-icon-default'}" aria-hidden="true">
+                ${item.icon || '🔔'}
+            </div>
+            <div class="notif-card-content">
+                <div class="notif-card-header">
+                    <h4 class="notif-card-title">${this.escapeHtml(item.title)}</h4>
+                    <time class="notif-card-time" datetime="${item.createdAt}" title="${new Date(item.createdAt).toLocaleString()}">
+                        ${this.escapeHtml(item.timeAgo)}
+                    </time>
                 </div>
-                <div class="notif-card-content">
-                    <div class="notif-card-header">
-                        <h4 class="notif-card-title">${this.escapeHtml(item.title)}</h4>
-                        <time class="notif-card-time" datetime="${item.createdAt}" title="${new Date(item.createdAt).toLocaleString()}">
-                            ${this.escapeHtml(item.timeAgo)}
-                        </time>
-                    </div>
-                    <p class="notif-card-body">${this.escapeHtml(item.body)}</p>
-                    <div class="notif-card-actions">
-                        ${item.actionType && item.actionType !== 'none' && item.actionType !== 'dismiss' ? `
-                            <button type="button" class="btn-notif-btn notif-btn-action" data-action="${item.actionType}">
-                                ${this.escapeHtml(item.actionLabel)}
-                            </button>
-                        ` : ''}
-                        ${!item.isRead ? `
-                            <button type="button" class="btn-notif-btn notif-btn-read" title="Mark as read">
-                                Mark Read
-                            </button>
-                        ` : ''}
-                        <button type="button" class="btn-notif-btn notif-btn-delete" title="Dismiss notification" aria-label="Dismiss">
-                            ✕
+                <p class="notif-card-body">${this.escapeHtml(item.body)}</p>
+                <div class="notif-card-actions">
+                    ${item.actionType && item.actionType !== 'none' && item.actionType !== 'dismiss' ? `
+                        <button type="button" class="btn-notif-btn notif-btn-action" data-action="${item.actionType}">
+                            ${this.escapeHtml(item.actionLabel)}
                         </button>
-                    </div>
+                    ` : ''}
+                    ${!item.isRead ? `
+                        <button type="button" class="btn-notif-btn notif-btn-read" title="Mark as read">
+                            Mark Read
+                        </button>
+                    ` : ''}
+                    <button type="button" class="btn-notif-btn notif-btn-delete" title="Dismiss notification" aria-label="Dismiss">
+                        ✕
+                    </button>
                 </div>
-                ${!item.isRead ? `<span class="notif-unread-dot" title="Unread notification" aria-label="Unread"></span>` : ''}
-            `;
+            </div>
+            ${!item.isRead ? `<span class="notif-unread-dot" title="Unread notification" aria-label="Unread"></span>` : ''}
+        `;
 
-            // Action button click
-            const actionBtn = card.querySelector('.notif-btn-action');
-            if (actionBtn) {
-                actionBtn.addEventListener('click', async (e) => {
-                    e.stopPropagation();
-                    await this.handleNotificationAction(root, item);
-                });
-            }
-
-            // Mark read button click
-            const readBtn = card.querySelector('.notif-btn-read');
-            if (readBtn) {
-                readBtn.addEventListener('click', async (e) => {
-                    e.stopPropagation();
-                    readBtn.disabled = true;
-                    await this.markNotificationAsRead(root, item.id, card);
-                });
-            }
-
-            // Delete button click
-            const delBtn = card.querySelector('.notif-btn-delete');
-            if (delBtn) {
-                delBtn.addEventListener('click', async (e) => {
-                    e.stopPropagation();
-                    delBtn.disabled = true;
-                    await this.deleteNotification(root, item.id, card);
-                });
-            }
-
-            // Card background click executes contextual action
-            card.addEventListener('click', async (e) => {
-                if (e.target.closest('button')) return;
+        // Action button click
+        const actionBtn = card.querySelector('.notif-btn-action');
+        if (actionBtn) {
+            actionBtn.addEventListener('click', async (e) => {
+                e.stopPropagation();
                 await this.handleNotificationAction(root, item);
             });
+        }
 
-            // Keyboard accessibility (Enter/Space)
-            card.addEventListener('keydown', async (e) => {
-                if (e.key === 'Enter' || e.key === ' ') {
-                    if (e.target === card) {
-                        e.preventDefault();
-                        await this.handleNotificationAction(root, item);
-                    }
-                }
+        // Mark read button click
+        const readBtn = card.querySelector('.notif-btn-read');
+        if (readBtn) {
+            readBtn.addEventListener('click', async (e) => {
+                e.stopPropagation();
+                readBtn.disabled = true;
+                await this.markNotificationAsRead(root, item.id, card);
             });
+        }
 
-            body.appendChild(card);
+        // Delete button click
+        const delBtn = card.querySelector('.notif-btn-delete');
+        if (delBtn) {
+            delBtn.addEventListener('click', async (e) => {
+                e.stopPropagation();
+                delBtn.disabled = true;
+                await this.deleteNotification(root, item.id, card);
+            });
+        }
+
+        // Card background click executes contextual action
+        card.addEventListener('click', async (e) => {
+            if (e.target.closest('button')) return;
+            await this.handleNotificationAction(root, item);
         });
+
+        // Keyboard accessibility (Enter/Space)
+        card.addEventListener('keydown', async (e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+                if (e.target === card) {
+                    e.preventDefault();
+                    await this.handleNotificationAction(root, item);
+                }
+            }
+        });
+
+        return card;
     },
 
     /**
@@ -3064,7 +3316,7 @@ export const AppView = {
                                     <label class="member-select-checkbox-item">
                                         <input type="checkbox" class="grp-friend-cb" value="${f.id}" />
                                         <div class="group-member-avatar" style="width: 28px; height: 28px; font-size: 0.75rem;">
-                                            ${f.avatarUrl ? `<img src="${f.avatarUrl}" alt="${f.username}" />` : `<span>${f.username.charAt(0).toUpperCase()}</span>`}
+                                            ${f.avatarUrl ? `<img src="${f.avatarUrl}" alt="${f.username}" loading="lazy" decoding="async" />` : `<span>${f.username.charAt(0).toUpperCase()}</span>`}
                                         </div>
                                         <div style="font-size: 0.8rem; font-weight: 500;">
                                             ${this.escapeHtml(f.displayName || f.username)} <span style="color: var(--text-muted); font-size: 0.75rem;">@${this.escapeHtml(f.username)}</span>
@@ -3190,7 +3442,7 @@ export const AppView = {
                                     <label class="member-select-checkbox-item">
                                         <input type="checkbox" class="add-friend-cb" value="${f.id}" />
                                         <div class="group-member-avatar" style="width: 30px; height: 30px; font-size: 0.75rem;">
-                                            ${f.avatarUrl ? `<img src="${f.avatarUrl}" alt="${f.username}" />` : `<span>${f.username.charAt(0).toUpperCase()}</span>`}
+                                            ${f.avatarUrl ? `<img src="${f.avatarUrl}" alt="${f.username}" loading="lazy" decoding="async" />` : `<span>${f.username.charAt(0).toUpperCase()}</span>`}
                                         </div>
                                         <div style="font-size: 0.8rem; font-weight: 500;">
                                             ${this.escapeHtml(f.displayName || f.username)} <span style="color: var(--text-muted); font-size: 0.75rem;">@${this.escapeHtml(f.username)}</span>
@@ -3939,13 +4191,26 @@ export const AppView = {
      * Setup Realtime WSS listeners for live chat & social updates
      */
     setupRealtimeListeners(root) {
-        this.unsubscribeRealtime = realtimeService.subscribeToMessages((newMsg) => {
-            // If message is in active conversation, append it
-            if (this.state.activeConversation && newMsg.conversation_id === this.state.activeConversation.id) {
-                this.loadMessages(root, this.state.activeConversation.id);
-            }
-            // Update conversation list preview
+        if (this.unsubscribeRealtime) {
+            this.unsubscribeRealtime();
+            this.unsubscribeRealtime = null;
+        }
+        if (this.socialChannel) {
+            try { this.socialChannel.unsubscribe(); } catch (e) {}
+            this.socialChannel = null;
+        }
+        if (this.unsubscribeNotifications) {
+            this.unsubscribeNotifications();
+            this.unsubscribeNotifications = null;
+        }
+
+        const debouncedLoadConversations = debounce(() => {
             this.loadConversations(root);
+        }, 300);
+
+        this.unsubscribeRealtime = realtimeService.subscribeToMessages((newMsg) => {
+            // Update conversation list preview (debounced to avoid DB query spam)
+            debouncedLoadConversations();
         });
 
         // Realtime social relationship updates
@@ -3979,6 +4244,59 @@ export const AppView = {
             }
         } catch (err) {
             console.warn('[AppView] Notification realtime listener error:', err);
+        }
+
+        // Realtime & Offline Connection Monitor
+        try {
+            if (this.unsubscribeConnectionStatus) {
+                this.unsubscribeConnectionStatus();
+            }
+            this.unsubscribeConnectionStatus = realtimeService.onStatusChange((status) => {
+                this.updateConnectionStatusUI(root, status);
+            });
+        } catch (connErr) {
+            console.warn('[AppView] Connection status monitor error:', connErr);
+        }
+    },
+
+    /**
+     * Update Realtime & Offline Connection Status UI
+     */
+    updateConnectionStatusUI(root, status) {
+        const banner = root.querySelector('#connection-status-banner');
+        if (!banner) return;
+        const icon = banner.querySelector('#connection-status-icon');
+        const text = banner.querySelector('#connection-status-text');
+
+        banner.classList.remove('status-offline', 'status-reconnecting', 'status-connected');
+
+        if (status === 'offline') {
+            banner.classList.add('status-offline');
+            if (icon) icon.innerHTML = '⚡';
+            if (text) text.textContent = 'You are offline — Encrypted communications paused';
+            banner.style.display = 'flex';
+        } else if (status === 'reconnecting') {
+            banner.classList.add('status-reconnecting');
+            if (icon) icon.innerHTML = '<span class="status-spinner"></span>';
+            if (text) text.textContent = 'Reconnecting to secure realtime channel...';
+            banner.style.display = 'flex';
+        } else if (status === 'disconnected') {
+            banner.classList.add('status-reconnecting');
+            if (icon) icon.innerHTML = '⚠️';
+            if (text) text.textContent = 'Realtime disconnected. Reconnecting...';
+            banner.style.display = 'flex';
+        } else if (status === 'connected') {
+            if (banner.style.display !== 'none' && !banner.classList.contains('status-connected')) {
+                banner.classList.add('status-connected');
+                if (icon) icon.innerHTML = '✓';
+                if (text) text.textContent = 'Connected';
+                setTimeout(() => {
+                    banner.style.display = 'none';
+                    banner.classList.remove('status-connected');
+                }, 1500);
+            } else {
+                banner.style.display = 'none';
+            }
         }
     },
 

@@ -11,6 +11,54 @@ class RealtimeService {
         this.activeChannels = new Map();
         this.globalMessageListeners = new Set();
         this.globalPresenceChannel = null;
+        this.status = typeof navigator !== 'undefined' && navigator.onLine ? 'connected' : 'offline';
+        this.statusListeners = new Set();
+
+        if (typeof window !== 'undefined') {
+            window.addEventListener('online', () => {
+                this.setStatus('reconnecting');
+                setTimeout(() => {
+                    if (navigator.onLine) {
+                        this.setStatus('connected');
+                    }
+                }, 1800);
+            });
+
+            window.addEventListener('offline', () => {
+                this.setStatus('offline');
+            });
+        }
+    }
+
+    /**
+     * Set connection status and inform all active UI listeners
+     * @param {'connected' | 'reconnecting' | 'disconnected' | 'offline'} newStatus 
+     */
+    setStatus(newStatus) {
+        if (this.status !== newStatus) {
+            this.status = newStatus;
+            this.statusListeners.forEach(fn => {
+                try { fn(newStatus); } catch (e) { console.warn(e); }
+            });
+        }
+    }
+
+    /**
+     * Subscribe to realtime connection status updates
+     * @param {Function} callback - (status) => void
+     * @returns {Function} Unsubscribe
+     */
+    onStatusChange(callback) {
+        this.statusListeners.add(callback);
+        // Immediately notify with current status
+        callback(this.status);
+        return () => {
+            this.statusListeners.delete(callback);
+        };
+    }
+
+    getStatus() {
+        return this.status;
     }
 
     /**
@@ -140,6 +188,7 @@ class RealtimeService {
 
         channel.subscribe(async (status) => {
             if (status === 'SUBSCRIBED') {
+                this.setStatus('connected');
                 const user = await authService.getUser();
                 if (user) {
                     await channel.track({
@@ -147,6 +196,10 @@ class RealtimeService {
                         online_at: new Date().toISOString()
                     });
                 }
+            } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+                this.setStatus(navigator.onLine ? 'reconnecting' : 'offline');
+            } else if (status === 'CLOSED') {
+                this.setStatus(navigator.onLine ? 'disconnected' : 'offline');
             }
         });
 
@@ -274,13 +327,26 @@ class RealtimeService {
                         this.globalMessageListeners.forEach(cb => cb(payload.new));
                     }
                 )
-                .subscribe();
+                .subscribe((status) => {
+                    if (status === 'SUBSCRIBED') {
+                        this.setStatus('connected');
+                    } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+                        this.setStatus(navigator.onLine ? 'reconnecting' : 'offline');
+                    }
+                });
 
             this.activeChannels.set('global-messages', channel);
         }
 
         return () => {
             this.globalMessageListeners.delete(callback);
+            if (this.globalMessageListeners.size === 0 && this.activeChannels.has('global-messages')) {
+                const ch = this.activeChannels.get('global-messages');
+                if (ch) {
+                    ch.unsubscribe();
+                    this.activeChannels.delete('global-messages');
+                }
+            }
         };
     }
 
